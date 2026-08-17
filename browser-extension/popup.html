@@ -146,20 +146,21 @@
         ⚠ First-time setup required:<br>
         1. Run in Terminal:<br>
         <code style="background:#020617; padding: 2px 4px; border-radius: 3px; font-size: 9px;">bash native-host/install_native_host.sh</code><br>
-        2. Then log in below (one-time only).
+        2. Paste your Monarch session cookie below.
       </div>
     </div>
-    <label for="monarchEmail">Monarch Email:</label>
-    <input type="email" id="monarchEmail" placeholder="your@email.com">
-    <label for="monarchPassword">Monarch Password:</label>
-    <input type="password" id="monarchPassword" placeholder="••••••••">
-    <label for="monarchMfa">MFA Secret Key (optional):</label>
-    <input type="text" id="monarchMfa" placeholder="TOTP secret (not the 6-digit code)">
-    <button id="loginMonarchBtn" class="btn btn-primary">Log Into Monarch</button>
+    <label for="monarchTokenInput">Monarch Session Cookie / Token (Recommended):</label>
+    <input type="password" id="monarchTokenInput" placeholder="Paste session_id=... or token">
+    <button id="saveTokenBtn" class="btn btn-primary">Save Monarch Session</button>
+    <div class="help-text" style="margin-top: 4px;">💡 Copy from browser DevTools ➔ Network ➔ GraphQL ➔ Cookie header.</div>
     <div style="margin-top: 10px; border-top: 1px dashed #334155; padding-top: 8px;">
-      <label for="monarchTokenInput">Or Paste Session Token directly:</label>
-      <input type="password" id="monarchTokenInput" placeholder="Paste token if login rate limited...">
-      <button id="saveTokenBtn" class="btn btn-sm" style="background: #334155; color: #fff;">Save Session Token</button>
+      <label for="monarchEmail">Or Login via Email & Password:</label>
+      <input type="email" id="monarchEmail" placeholder="your@email.com">
+      <label for="monarchPassword">Monarch Password:</label>
+      <input type="password" id="monarchPassword" placeholder="••••••••">
+      <label for="monarchMfa">MFA Secret Key / OTP (optional):</label>
+      <input type="text" id="monarchMfa" placeholder="6-digit code or TOTP secret">
+      <button id="loginMonarchBtn" class="btn btn-sm" style="background: #334155; color: #fff;">Log Into Monarch</button>
     </div>
   </div>
 

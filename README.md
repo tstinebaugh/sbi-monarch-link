@@ -9,15 +9,15 @@ A lightweight, secure Chrome / Brave / Edge browser extension that bridges your 
 - 🏦 **Automatic SBI Shinsei Balance Parsing**: Reads your JPY balance automatically from SBI Shinsei PowerDirect online banking.
 - 💱 **Live Spot FX Exchange Rates**: Converts JPY to USD in real-time using spot currency rates.
 - 🔔 **Interactive On-Page Sync Banner**: When logged into SBI Shinsei, a non-intrusive floating banner appears showing `¥ JPY ➔ $ USD` with a 1-Click **"Sync Now"** button.
-- 🔐 **Zero-Cloud & Apple Keychain Security**: Native Python host handles auth directly with Monarch Money API and stores session credentials securely in macOS Apple Keychain.
-- 📋 **Account Dropdown Selector**: Automatically pulls your manual accounts from Monarch for easy 1-click selection.
+- 🔐 **Zero-Cloud & Apple Keychain Security**: Native Python host handles auth directly with Monarch Money GraphQL API and stores session credentials securely in macOS Apple Keychain.
+- 📋 **Account Dropdown Selector**: Automatically pulls your accounts from Monarch for easy 1-click selection.
 
 ---
 
 ## 🔒 Security & Privacy by Design
 
 - **100% Local Processing**: No intermediate servers, telemetry, analytics, or third-party cloud backends. All communication happens strictly between your browser, your local machine, and Monarch's official GraphQL API over TLS.
-- **Apple Keychain Credential Storage**: Session cookies and auth tokens are stored encrypted in the macOS Keychain (`security` subsystem) rather than plaintext configuration files.
+- **Apple Keychain Credential Storage**: Session credentials are stored encrypted in the macOS Keychain (`security` subsystem) rather than plaintext configuration files.
 - **Scoped Permissions**: The native messaging host manifest strictly locks communication to your extension's unique origin ID.
 
 ---
@@ -44,18 +44,30 @@ Follow the prompt (press Enter to accept the default Extension ID, or paste your
 
 ## 🚀 How to Use
 
-1. **Create a Manual Account in Monarch**:
-   - In Monarch Money, go to **Accounts ➔ Add Account ➔ Manual Account**.
-   - Name it `SBI Shinsei Bank` (Account Type: Cash / Checking / Asset).
+### 1. Create a Manual Account in Monarch
+1. In [Monarch Money](https://app.monarchmoney.com/), go to **Accounts ➔ Add Account ➔ Manual Account**.
+2. Name it `SBI Shinsei Bank` (Account Type: Cash / Checking / Asset).
 
-2. **Connect Monarch (One-time Setup)**:
-   - Open the extension popup in your browser toolbar.
-   - Enter your Monarch email & password (or paste your session cookie/token).
-   - Once connected, your session is saved in Apple Keychain.
+### 2. Connect Your Monarch Session (One-Time Setup)
+Because Monarch Money protects its login endpoints with Cloudflare bot detection, connecting via your active web browser session cookie is the recommended and reliable method.
 
-3. **Syncing your Balance**:
-   - **Method A (On-Page Banner)**: Log into [SBI Shinsei PowerDirect](https://bk.web.sbishinseibank.co.jp/). Click **"Sync Now"** on the floating banner in the bottom-right corner!
-   - **Method B (Extension Popup)**: Open the extension popup, verify the parsed balance, and click **"⚡ Sync Balance to Monarch"**.
+#### How to get your Monarch session cookie:
+1. Open [app.monarchmoney.com](https://app.monarchmoney.com) (or `app.monarch.com`) in your browser.
+2. Open Developer Tools (`Cmd + Option + I` or `F12`) ➔ click the **Network** tab.
+3. Type `graphql` in the filter box and click any request named `graphql`.
+4. In the right panel under **Headers** ➔ **Request Headers**, copy the full value next to `Cookie:` (or copy `session_id=...; csrftoken=...`).
+
+#### Save the session:
+- **Via Extension Popup**: Open the extension popup, paste the cookie into **"Paste Monarch Session Cookie / Token"**, and click **Save Session**.
+- **Via Terminal CLI**: Run:
+  ```bash
+  python3 native-host/sbi_monarch_host.py --session
+  ```
+  *(and paste your cookie string when prompted)*.
+
+### 3. Syncing Your Balance
+- **Method A (On-Page Banner)**: Log into [SBI Shinsei PowerDirect](https://bk.web.sbishinseibank.co.jp/). Click **"Sync Now"** on the floating banner in the bottom-right corner!
+- **Method B (Extension Popup)**: Open the extension popup, verify the parsed balance, and click **"⚡ Sync Balance to Monarch"**.
 
 ---
 
