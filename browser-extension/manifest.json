@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "SBI Shinsei to Monarch Money Syncer",
+  "version": "1.1.0",
+  "description": "Parses SBI Shinsei JPY balance, converts to USD with live exchange rates, and updates Monarch Money manual asset balance.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting",
+    "nativeMessaging",
+    "tabs",
+    "cookies"
+  ],
+  "host_permissions": [
+    "*://*.sbishinseibank.co.jp/*",
+    "*://*.shinseibank.com/*",
+    "https://open.er-api.com/*",
+    "*://api.monarch.com/*",
+    "*://*.monarch.com/*",
+    "*://app.monarch.com/*",
+    "*://api.monarchmoney.com/*",
+    "*://*.monarchmoney.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "SBI -> Monarch Link"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.sbishinseibank.co.jp/*",
+        "*://*.shinseibank.com/*",
+        "*://bk.web.sbishinseibank.co.jp/*"
+      ],
+      "js": ["content.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ]
+}

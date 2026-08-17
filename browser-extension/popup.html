@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SBI ➔ Monarch Link</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --accent: #38bdf8;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --success: #4ade80;
+      --error: #f87171;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      width: 340px;
+      margin: 0;
+      padding: 14px;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13px;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    h2 { font-size: 14px; margin: 0; color: var(--accent); display: flex; align-items: center; gap: 6px; }
+    .card {
+      background: var(--card-bg);
+      border-radius: 8px;
+      padding: 11px;
+      margin-bottom: 10px;
+      border: 1px solid var(--border);
+    }
+    label {
+      display: block;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 3px;
+    }
+    input, select {
+      width: 100%;
+      padding: 7px 8px;
+      border-radius: 5px;
+      border: 1px solid #475569;
+      background: var(--bg);
+      color: #fff;
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+    input:focus, select:focus { outline: none; border-color: var(--accent); }
+    button.btn {
+      width: 100%;
+      padding: 9px;
+      border-radius: 6px;
+      border: none;
+      font-weight: 600;
+      font-size: 12px;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    button.btn:hover { opacity: 0.85; }
+    button.btn-primary { background: #0284c7; color: #fff; }
+    button.btn-success { background: #16a34a; color: #fff; }
+    button.btn-sm { padding: 6px 10px; font-size: 11px; }
+    .account-badge {
+      font-size: 11px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: #1e293b;
+      border: 1px solid var(--border);
+      color: var(--accent);
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .rate-badge {
+      font-size: 11px;
+      background: #0369a1;
+      color: #e0f2fe;
+      padding: 3px 8px;
+      border-radius: 4px;
+      display: inline-block;
+      margin-bottom: 6px;
+    }
+    .result-box { font-size: 20px; font-weight: bold; color: var(--success); margin-top: 2px; }
+    .status { font-size: 11px; margin-top: 8px; text-align: center; word-break: break-word; min-height: 16px; }
+    .help-text { font-size: 10px; color: #94a3b8; margin-top: -4px; margin-bottom: 8px; line-height: 1.4; }
+    .error-box {
+      background: #450a0a;
+      border: 1px solid #7f1d1d;
+      border-radius: 6px;
+      padding: 8px;
+      font-size: 10px;
+      color: #fca5a5;
+      white-space: pre-wrap;
+      word-break: break-all;
+      margin-bottom: 8px;
+    }
+    .row { display: flex; gap: 6px; }
+    .row .btn { flex: 1; }
+    #loginIndicator {
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background: #334155;
+      color: #94a3b8;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h2>🏦 SBI ➔ Monarch Link</h2>
+    <span id="loginIndicator">○ Checking...</span>
+  </div>
+
+  <!-- Account Badge -->
+  <div class="account-badge">
+    <span>Monarch Account:</span>
+    <strong id="linkedAccountName">Not Connected</strong>
+  </div>
+
+  <!-- Account Selector (shown when connected) -->
+  <div id="accountSelectSection" style="margin-bottom: 10px; display: none;">
+    <label for="accountSelect">Target Monarch Account:</label>
+    <select id="accountSelect"></select>
+    <button id="refreshAccountsBtn" class="btn btn-sm" style="background: #334155; color: #e2e8f0; width: auto; margin-top: -4px;">↻ Refresh</button>
+  </div>
+
+  <!-- Login Section (shown when not set up) -->
+  <div id="loginSection" class="card" style="display: none;">
+    <div id="nativeHostError" class="error-box" style="display: none;"></div>
+    <div id="setupNeeded" style="display: none; margin-bottom: 8px;">
+      <div class="help-text" style="color: #fbbf24;">
+        ⚠ First-time setup required:<br>
+        1. Run in Terminal:<br>
+        <code style="background:#020617; padding: 2px 4px; border-radius: 3px; font-size: 9px;">bash native-host/install_native_host.sh</code><br>
+        2. Then log in below (one-time only).
+      </div>
+    </div>
+    <label for="monarchEmail">Monarch Email:</label>
+    <input type="email" id="monarchEmail" placeholder="your@email.com">
+    <label for="monarchPassword">Monarch Password:</label>
+    <input type="password" id="monarchPassword" placeholder="••••••••">
+    <label for="monarchMfa">MFA Secret Key (optional):</label>
+    <input type="text" id="monarchMfa" placeholder="TOTP secret (not the 6-digit code)">
+    <button id="loginMonarchBtn" class="btn btn-primary">Log Into Monarch</button>
+    <div style="margin-top: 10px; border-top: 1px dashed #334155; padding-top: 8px;">
+      <label for="monarchTokenInput">Or Paste Session Token directly:</label>
+      <input type="password" id="monarchTokenInput" placeholder="Paste token if login rate limited...">
+      <button id="saveTokenBtn" class="btn btn-sm" style="background: #334155; color: #fff;">Save Session Token</button>
+    </div>
+  </div>
+
+  <!-- Balance Section -->
+  <div class="card">
+    <label for="jpyInput">Auto-Detected JPY Balance (¥):</label>
+    <input type="text" id="jpyInput" placeholder="Open SBI Shinsei to auto-detect...">
+    <div id="detectionSource" style="font-size: 10px; color: #38bdf8; margin-bottom: 6px;">🔍 Open SBI Shinsei PowerDirect to auto-parse balance.</div>
+    <div id="rateBadge" class="rate-badge">Fetching live FX rate...</div>
+    <label style="margin-top: 6px;">Converted USD Balance:</label>
+    <div id="usdResult" class="result-box">$0.00</div>
+  </div>
+
+  <button id="syncBtn" class="btn btn-success">⚡ Sync Balance to Monarch</button>
+  <div id="status" class="status"></div>
+
+  <div style="margin-top: 10px;">
+    <label style="font-size: 10px;">Debug Log:</label>
+    <div id="debugBox" style="font-size: 9px; color: #94a3b8; font-family: monospace; height: 70px; overflow-y: auto; background: #020617; padding: 5px; border-radius: 5px; border: 1px solid #1e293b; white-space: pre-wrap; word-break: break-all;"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
