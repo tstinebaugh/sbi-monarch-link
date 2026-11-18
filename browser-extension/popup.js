@@ -10,6 +10,7 @@ const state = {
   connected: false,
   accounts: [],
   accountId: null,
+  lastSync: null,
   busy: false,
 };
 
@@ -119,17 +120,32 @@ function renderAccounts() {
   }
 
   for (const acc of state.accounts) {
-    const opt = new Option(`${acc.displayName} · ${fmtUSD(acc.currentBalance || 0)}`, acc.id);
+    // Name only: long names plus a balance get cut off in a 360px popup.
+    const opt = new Option(acc.displayName, acc.id);
+    opt.title = `${acc.displayName} · ${fmtUSD(acc.currentBalance || 0)}`;
     opt.selected = acc.id === state.accountId;
     select.append(opt);
   }
+  renderAccountMeta();
   render();
 }
 
+// One line under the picker: what Monarch shows now, and when we last synced.
+function renderAccountMeta() {
+  const acc = state.accounts.find(a => a.id === state.accountId);
+  const last = state.lastSync;
+  const parts = [];
+  if (acc) parts.push(`Monarch balance ${fmtUSD(acc.currentBalance || 0)}`);
+  if (!last) parts.push('not synced yet');
+  else if (acc && last.accountName === acc.displayName) parts.push(`synced ${timeAgo(last.at)}`);
+  else parts.push(`last synced ${fmtUSD(last.usd)} to ${last.accountName} ${timeAgo(last.at)}`);
+  const text = parts.join(' · ');
+  $('lastSyncLine').textContent = text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function renderLastSync(lastSync) {
-  $('lastSyncLine').textContent = lastSync
-    ? `Last synced ${fmtUSD(lastSync.usd)} to ${lastSync.accountName} · ${timeAgo(lastSync.at)}`
-    : 'Not synced yet.';
+  state.lastSync = lastSync || null;
+  renderAccountMeta();
 }
 
 // ── Data loading ──────────────────────────────────────────────────────────────
@@ -266,6 +282,7 @@ $('accountSelect').addEventListener('change', (e) => {
   state.accountId = e.target.value;
   chrome.storage.local.set({ monarchAccountId: state.accountId });
   setStatus('');
+  renderAccountMeta();
   render();
 });
 $('syncBtn').addEventListener('click', sync);

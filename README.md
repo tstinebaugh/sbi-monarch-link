@@ -7,6 +7,10 @@ A Chrome / Brave / Edge / Arc extension plus a small local Python service that c
 
 > **Platform:** macOS (the native host stores your session in Apple Keychain). Python 3.10+.
 
+![The sync banner on a bank account summary page, next to the extension popup showing ¥1,250,000 converted to $8,063.75](docs/screenshots/hero.png)
+
+<sub>Screenshots use sample data on a mock bank page.</sub>
+
 ---
 
 ## ✨ Features
@@ -18,6 +22,16 @@ A Chrome / Brave / Edge / Arc extension plus a small local Python service that c
 - 🔐 **Session stored in Apple Keychain**: never in a config file, browser storage, or process arguments.
 - 🕒 **Sync history at a glance**: the popup and banner show when you last synced and whether Monarch is up to date.
 - 📋 **Account picker**: lists your manual Monarch accounts so you choose where the balance goes.
+
+### Screenshots
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/popup-light.png" width="300" alt="Extension popup in light mode"><br><sub>Popup · light</sub></td>
+    <td align="center"><img src="docs/screenshots/popup-dark.png" width="300" alt="Extension popup in dark mode"><br><sub>Popup · dark</sub></td>
+    <td align="center"><img src="docs/screenshots/banner-sync.gif" width="300" alt="On-page banner going from Sync now to Syncing to Synced"><br><sub>On-page banner</sub></td>
+  </tr>
+</table>
 
 ---
 
@@ -143,6 +157,7 @@ sbi-monarch-link/
 ├── native-host/
 │   ├── sbi_monarch_host.py    # Native host: Keychain session + Monarch GraphQL
 │   └── install_native_host.sh # Generates launcher + host manifest, registers with browsers
+├── docs/screenshots/          # README images (sample data)
 ├── sbi_monarch_sync.py        # Stand-alone CLI (reuses the native host)
 └── tests/                     # pytest suite for the native host
 ```

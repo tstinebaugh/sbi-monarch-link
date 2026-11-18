@@ -159,7 +159,7 @@ const BANNER_CSS = `
   .card {
     --bg: #ffffff; --text: #111827; --muted: #6b7280; --border: #e3e6ef;
     --accent: #4f46e5; --accent-hover: #4338ca; --on-accent: #fff;
-    --success: #15803d; --danger: #b91c1c; --soft: #f1f3f9;
+    --success: #15803d; --success-soft: #dcfce7; --danger: #b91c1c; --soft: #f1f3f9;
     font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     color: var(--text); background: var(--bg);
     border: 1px solid var(--border); border-radius: 14px;
@@ -171,7 +171,7 @@ const BANNER_CSS = `
     .card {
       --bg: #131a2e; --text: #e5e7eb; --muted: #94a3b8; --border: #263049;
       --accent: #818cf8; --accent-hover: #a5b4fc; --on-accent: #0b1020;
-      --success: #4ade80; --danger: #f87171; --soft: #1a2238;
+      --success: #4ade80; --success-soft: #0f2e1d; --danger: #f87171; --soft: #1a2238;
     }
   }
   @keyframes in { from { opacity: 0; transform: translateY(6px); } }
@@ -196,6 +196,7 @@ const BANNER_CSS = `
   .btn:hover:not(:disabled) { background: var(--accent-hover); }
   .btn:disabled { opacity: .55; cursor: default; }
   .btn.secondary { background: var(--soft); color: var(--text); }
+  .btn.done, .btn.done:disabled { opacity: 1; background: var(--success-soft); color: var(--success); }
 `;
 
 const LOGO_SVG = `<svg viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
@@ -237,8 +238,8 @@ function el(tag, className, text) {
   return node;
 }
 
-function button(label, act, { secondary = false, disabled = false } = {}) {
-  const b = el('button', 'btn' + (secondary ? ' secondary' : ''), label);
+function button(label, act, { secondary = false, disabled = false, done = false } = {}) {
+  const b = el('button', 'btn' + (secondary ? ' secondary' : '') + (done ? ' done' : ''), label);
   b.dataset.act = act;
   b.disabled = disabled;
   return b;
@@ -288,8 +289,8 @@ async function renderBanner(view) {
   else if (lastSync) sub = el('div', 'sub', `Last synced ${timeAgo(lastSync.at)}`);
   if (sub) content.append(sub);
 
-  const label = { syncing: 'Syncing…', synced: 'Synced', error: 'Try again' }[v.state] || 'Sync now';
-  actions.append(button(label, 'sync', { disabled: v.state === 'syncing' || v.state === 'synced' }));
+  const label = { syncing: 'Syncing…', synced: '✓ Synced', error: 'Try again' }[v.state] || 'Sync now';
+  actions.append(button(label, 'sync', { disabled: v.state === 'syncing' || v.state === 'synced', done: v.state === 'synced' }));
 }
 
 function onBannerClick(e) {
