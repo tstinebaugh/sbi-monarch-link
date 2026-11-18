@@ -27,7 +27,7 @@ def test_cookie_session_uses_new_domain_and_csrf_header():
 
 def test_legacy_token_uses_authorization_header():
     headers, endpoint = host.parse_auth_headers('deadbeef')
-    assert endpoint == 'https://api.monarchmoney.com/graphql'
+    assert endpoint == 'https://api.monarch.com/graphql'
     assert headers['Authorization'] == 'Token deadbeef'
     assert 'Cookie' not in headers
 
@@ -108,7 +108,7 @@ def test_sync_success_converts_and_reports(monkeypatch):
     assert sent == {'input': {'id': '42', 'displayBalance': 6700.0}}
 
 
-def test_expired_session_clears_keychain(monkeypatch):
+def test_expired_keychain_session_clears_keychain(monkeypatch):
     monkeypatch.setattr(host, 'keychain_load', lambda: 'session_id=x')
     deleted = []
     monkeypatch.setattr(host, 'keychain_delete', lambda: deleted.append(True))
@@ -149,9 +149,10 @@ def test_oversized_message_rejected(monkeypatch):
 def test_browser_session_round_trip_uses_its_endpoint_and_user_agent():
     stored = host.encode_session('session_id=a; csrftoken=b', 'TestUA/1.0', 'https://api.monarchmoney.com/graphql')
     headers, endpoint = host.parse_auth_headers(stored)
-    assert endpoint == 'https://api.monarchmoney.com/graphql'
+    # monarchmoney.com redirects to monarch.com, so requests always go to the new host
+    assert endpoint == 'https://api.monarch.com/graphql'
     assert headers['User-Agent'] == 'TestUA/1.0'
-    assert headers['Origin'] == 'https://app.monarchmoney.com'
+    assert headers['Origin'] == 'https://app.monarch.com'
     assert headers['X-Csrftoken'] == 'b'
 
 
@@ -183,3 +184,141 @@ def test_request_session_is_used_instead_of_keychain(monkeypatch):
 def test_malformed_request_session_rejected():
     res = run(host.handle({'action': 'get_accounts', 'session': {'cookie': 5}}))
     assert res['error'] == 'invalid_session'
+
+
+def test_rejected_browser_session_keeps_keychain(monkeypatch):
+    deleted = []
+    monkeypatch.setattr(host, 'keychain_delete', lambda: deleted.append(True))
+
+    async def rejected(*a, **k):
+        raise host.AuthError('HTTP 401: Authentication credentials were not provided.')
+
+    monkeypatch.setattr(host, 'monarch_graphql', rejected)
+    res = run(host.handle({'action': 'get_accounts', 'session': {'cookie': 'session_id=x'}}))
+    assert res['error'] == 'token_expired' and res['session_source'] == 'browser'
+    assert 'credentials were not provided' in res['message']
+    assert not deleted
+
+
+@pytest.mark.parametrize('detail, is_auth', [
+    ('Authentication credentials were not provided.', True),
+    ('Invalid token.', True),
+    ('CSRF Failed: CSRF token missing.', False),
+    ('blocked by Cloudflare bot protection', False),
+])
+def test_auth_failure_classification(detail, is_auth):
+    assert host.looks_like_auth_failure(detail) is is_auth
+
+
+# ── Network failures are reported, never blank ────────────────────────────────
+
+def test_describe_never_empty():
+    assert host.describe(TimeoutError()) == 'TimeoutError'
+    assert host.describe(ValueError('boom')) == 'boom'
+
+
+def test_network_error_message_reaches_ui(monkeypatch):
+    async def stalled(*a, **k):
+        raise host.NetworkError('Timed out waiting for api.monarch.com (no response in 45 s).')
+
+    monkeypatch.setattr(host, 'monarch_graphql', stalled)
+    res = run(host.handle({'action': 'get_accounts', 'session': {'cookie': 'session_id=x'}}))
+    assert res['error'] == 'fetch_failed' and 'Timed out' in res['message']
+
+
+def test_http_request_prefers_ipv4_then_falls_back(monkeypatch):
+    families = []
+
+    class FakeConnector:
+        def __init__(self, family=0):
+            families.append(family)
+            self.family = family
+
+    class FakeResp:
+        status, reason, headers, cookies = 200, 'OK', {}, {}
+
+        async def read(self):
+            return b'{}'
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeSession:
+        def __init__(self, connector, timeout):
+            self.connector = connector
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def request(self, *a, **k):
+            if self.connector.family == host.socket.AF_INET:
+                raise host.aiohttp.ClientConnectorError(None, OSError('no IPv4 route'))
+            return FakeResp()
+
+    monkeypatch.setattr(host.aiohttp, 'TCPConnector', FakeConnector)
+    monkeypatch.setattr(host.aiohttp, 'ClientSession', FakeSession)
+    resp = run(host.http_request('GET', 'https://api.monarch.com/graphql'))
+    assert resp.ok and families == [host.socket.AF_INET, 0]
+
+
+# ── CSRF handling (mirrors Monarch's web app: GET /auth/csrf/ then X-CSRFToken) ──
+
+def _resp(status=200, body=b'{}', cookies=None):
+    return host.HttpResponse(status, '', {}, body, cookies or {})
+
+
+def test_cookie_session_without_csrf_fetches_one(monkeypatch):
+    calls = []
+
+    async def fake_request(method, url, **kw):
+        calls.append((method, url, dict(kw.get('headers') or {})))
+        if url == host.CSRF_ENDPOINT:
+            return _resp(cookies={'csrftoken': 'fresh123'})
+        h = kw['headers']
+        if h.get('X-Csrftoken') != 'fresh123' or 'csrftoken=fresh123' not in h['Cookie']:
+            return _resp(403, b'{"detail": "CSRF Failed: CSRF cookie not set."}')
+        return _resp(body=b'{"data": {"accounts": []}}')
+
+    monkeypatch.setattr(host, 'http_request', fake_request)
+    data = run(host.monarch_graphql('session_id=abc', 'query { accounts { id } }'))
+    assert data == {'data': {'accounts': []}}
+    assert [c[1] for c in calls] == [host.CSRF_ENDPOINT, host.API_ENDPOINT]
+    assert calls[0][2]['Cookie'] == 'session_id=abc'  # session sent when fetching the token
+
+
+def test_stale_csrf_is_refreshed_once(monkeypatch):
+    calls = []
+
+    async def fake_request(method, url, **kw):
+        calls.append(url)
+        if url == host.CSRF_ENDPOINT:
+            return _resp(cookies={'csrftoken': 'new'})
+        if kw['headers'].get('X-Csrftoken') == 'old':
+            return _resp(403, b'{"detail": "CSRF Failed: CSRF token incorrect."}')
+        return _resp(body=b'{"data": {}}')
+
+    monkeypatch.setattr(host, 'http_request', fake_request)
+    run(host.monarch_graphql('session_id=abc; csrftoken=old', 'q'))
+    assert calls == [host.API_ENDPOINT, host.CSRF_ENDPOINT, host.API_ENDPOINT]
+
+
+def test_persistent_csrf_failure_is_not_reported_as_expired(monkeypatch):
+    async def fake_request(method, url, **kw):
+        if url == host.CSRF_ENDPOINT:
+            return _resp(cookies={'csrftoken': 't'})
+        return _resp(403, b'{"detail": "CSRF Failed: Origin checking failed."}')
+
+    monkeypatch.setattr(host, 'http_request', fake_request)
+    with pytest.raises(ValueError, match='CSRF'):
+        run(host.monarch_graphql('session_id=abc', 'q'))
+
+
+def test_set_cookie_replaces_existing_value():
+    assert host.set_cookie('session_id=a; csrftoken=old', 'csrftoken', 'new') == 'session_id=a; csrftoken=new'
+    assert host.set_cookie('session_id=a', 'csrftoken', 'n') == 'session_id=a; csrftoken=n'

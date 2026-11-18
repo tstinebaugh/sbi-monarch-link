@@ -171,14 +171,15 @@ async function loadBalance() {
 
 async function loadAccounts({ keepStatus = false } = {}) {
   log('Loading Monarch accounts…');
+  if (!keepStatus) setStatus('Loading Monarch accounts…');
   const res = await send('getMonarchAccounts');
   if (!res.success) {
     state.connected = false;
     render();
-    if (res.error === 'token_expired') setStatus('Your Monarch session expired. Log into Monarch, then Connect.', 'error');
+    if (res.error === 'token_expired') setStatus(res.message || 'Your Monarch session expired. Log into Monarch, then Connect.', 'error');
     else if (res.error === 'not_logged_in') setStatus('Connect Monarch to continue.');
     else setStatus(res.message || 'Could not load Monarch accounts.', 'error');
-    log('Account load failed: ' + (res.error || res.message));
+    log(`Account load failed: ${res.error || ''} ${res.session_source ? `[${res.session_source} session] ` : ''}${res.detail || res.message || ''}`);
     return;
   }
   state.connected = true;
@@ -197,7 +198,7 @@ async function loadAccounts({ keepStatus = false } = {}) {
 // ── Actions ───────────────────────────────────────────────────────────────────
 
 async function connectMonarch() {
-  setStatus('Connecting…');
+  setStatus('Connecting… (Monarch can take a few seconds)');
   const res = await send('connectMonarch');
   if (res.success) {
     state.connected = true;
@@ -209,7 +210,8 @@ async function connectMonarch() {
     setStatus(res.message);
   } else {
     setStatus(res.message || 'Could not connect.', 'error');
-    log('Connect failed: ' + (res.error || res.message));
+    log(`Connect failed: ${res.error || ''} ${res.session_source ? `[${res.session_source} session] ` : ''}${res.detail || res.message || ''}`);
+    if (res.cookieReport) log('Monarch cookies visible to the extension: ' + res.cookieReport);
   }
 }
 
@@ -241,7 +243,8 @@ async function sync() {
     loadAccounts({ keepStatus: true });
   } else if (res.error === 'token_expired' || res.error === 'not_logged_in') {
     state.connected = false;
-    setStatus('Your Monarch session expired. Log into Monarch, then Connect.', 'error');
+    setStatus(res.message || 'Your Monarch session expired. Log into Monarch, then Connect.', 'error');
+    log(`Sync auth failure: ${res.detail || res.message}`);
   } else {
     setStatus('Sync failed: ' + (res.message || res.error), 'error');
     log('Sync error: ' + (res.message || res.error));
@@ -297,6 +300,8 @@ async function init() {
   const status = await send('getStatus');
   state.hostInstalled = !!status.hostInstalled;
   log(state.hostInstalled ? `Native host v${status.hostVersion || '?'} OK` : `Native host missing: ${status.hostMessage || status.message}`);
+  log(`Monarch session in browser: ${status.browserLoggedIn ? 'found' : 'not found'}; saved in Keychain: ${status.hasStoredSession ? 'yes' : 'no'}`);
+  if (status.cookieReport) log('Monarch cookies visible to the extension: ' + status.cookieReport);
 
   if (!state.hostInstalled) {
     setStatus('Finish setup to start syncing.');

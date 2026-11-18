@@ -22,9 +22,11 @@ import asyncio
 import getpass
 import json
 import math
+import socket
 import struct
 import sys
 import traceback
+from dataclasses import dataclass
 
 import aiohttp
 import keyring
@@ -40,7 +42,9 @@ HOST_VERSION = '1.3.0'
 KEYCHAIN_SERVICE = 'sbi-monarch-link'
 KEYCHAIN_ACCOUNT = 'monarch_session_token'
 
-HTTP_TIMEOUT = aiohttp.ClientTimeout(total=20)
+# Connecting should be quick; Monarch's API itself sometimes takes 10+ s to answer,
+# so the overall budget is generous.
+HTTP_TIMEOUT = aiohttp.ClientTimeout(total=45, sock_connect=8)
 
 # GraphQL endpoints a cookie session may be sent to. The browser extension tells us
 # which one the session belongs to; anything else is rejected so a session cookie
@@ -49,8 +53,12 @@ MONARCH_GRAPHQL_ENDPOINTS = (
     'https://api.monarch.com/graphql',
     'https://api.monarchmoney.com/graphql',
 )
-DEFAULT_COOKIE_ENDPOINT = MONARCH_GRAPHQL_ENDPOINTS[0]
-LEGACY_TOKEN_ENDPOINT = 'https://api.monarchmoney.com/graphql'
+# api.monarchmoney.com now 301-redirects to api.monarch.com (and a redirected POST
+# turns into a GET), so every request goes straight to the new host. Sessions are
+# shared across both domains.
+API_ENDPOINT = 'https://api.monarch.com/graphql'
+CSRF_ENDPOINT = 'https://api.monarch.com/auth/csrf/'
+APP_ORIGIN = 'https://app.monarch.com'
 DEFAULT_USER_AGENT = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
                       '(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36')
 
@@ -96,6 +104,63 @@ def keychain_delete() -> None:
     except (PasswordDeleteError, KeyringError):
         pass
 
+# ── HTTP ──────────────────────────────────────────────────────────────────────
+
+class NetworkError(Exception):
+    """The request never got a usable response (timeout / connection failure)."""
+
+
+@dataclass
+class HttpResponse:
+    status: int
+    reason: str
+    headers: dict
+    body: bytes
+    cookies: dict  # Set-Cookie name -> value (dict(headers) would drop repeated Set-Cookie lines)
+
+    @property
+    def ok(self) -> bool:
+        return 200 <= self.status < 300
+
+    def text(self) -> str:
+        return self.body.decode('utf-8', 'replace')
+
+    def json(self):
+        return json.loads(self.body)
+
+
+async def http_request(method: str, url: str, **kwargs) -> HttpResponse:
+    """One HTTP request, IPv4 first.
+
+    On some networks the IPv6 route to Cloudflare (which fronts Monarch) intermittently
+    stalls for 5-30 s even though IPv4 answers in ~100 ms. Happy Eyeballs doesn't help
+    because the IPv6 TCP connect itself succeeds. So try IPv4, and only fall back to the
+    system default (e.g. IPv6-only networks) when IPv4 can't connect at all.
+    """
+    last_error: Exception | None = None
+    for family in (socket.AF_INET, 0):
+        try:
+            connector = aiohttp.TCPConnector(family=family)
+            async with aiohttp.ClientSession(connector=connector, timeout=HTTP_TIMEOUT) as session:
+                async with session.request(method, url, allow_redirects=False, **kwargs) as resp:
+                    return HttpResponse(resp.status, resp.reason or '', dict(resp.headers), await resp.read(),
+                                        {name: morsel.value for name, morsel in resp.cookies.items()})
+        except aiohttp.ClientConnectorError as e:
+            last_error = e
+            continue
+        except asyncio.TimeoutError:
+            host = url.split('/')[2]
+            raise NetworkError(f'Timed out waiting for {host} (no response in {int(HTTP_TIMEOUT.total)} s). '
+                               'Check your connection or VPN and try again.') from None
+        except aiohttp.ClientError as e:
+            raise NetworkError(f'Network error talking to {url.split("/")[2]}: {e}') from None
+    raise NetworkError(f'Could not connect to {url.split("/")[2]}: {last_error}')
+
+
+def describe(e: Exception) -> str:
+    """Exception text that is never empty (TimeoutError() stringifies to '')."""
+    return str(e) or type(e).__name__
+
 # ── Monarch API Calls ─────────────────────────────────────────────────────────
 
 async def monarch_login(email: str, password: str, mfa_secret: str | None = None) -> str:
@@ -115,26 +180,22 @@ async def monarch_login(email: str, password: str, mfa_secret: str | None = None
         else:
             payload['totp'] = oathtool.generate_otp(clean_mfa)
 
-    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
-        async with session.post(MONARCH_LOGIN, json=payload, headers=BASE_HEADERS) as resp:
-            try:
-                body = await resp.json(content_type=None)
-            except Exception:
-                raw = await resp.text()
-                raise ValueError(f'Server returned non-JSON HTTP {resp.status}: {raw[:150]}') from None
+    resp = await http_request('POST', MONARCH_LOGIN, json=payload, headers=BASE_HEADERS)
+    try:
+        body = resp.json()
+    except ValueError:
+        raise ValueError(f'Login failed (HTTP {resp.status}): {error_detail(resp)}') from None
 
-            if resp.status == 403:
-                if isinstance(body, dict) and body.get('detail') == 'MFA_REQUIRED':
-                    raise ValueError('MFA_REQUIRED')
-                detail = body.get('detail', body) if isinstance(body, dict) else body
-                raise ValueError(f'Login blocked HTTP 403: {detail}')
-            if resp.status != 200:
-                detail = body.get('detail', resp.reason) if isinstance(body, dict) else resp.reason
-                raise ValueError(f'Login failed HTTP {resp.status}: {detail}')
-            token = body.get('token') if isinstance(body, dict) else None
-            if not token:
-                raise ValueError('Login succeeded but no token was returned.')
-            return token
+    if resp.status == 403:
+        if isinstance(body, dict) and body.get('detail') == 'MFA_REQUIRED':
+            raise ValueError('MFA_REQUIRED')
+        raise ValueError(f'Login blocked (HTTP 403): {error_detail(resp)}')
+    if resp.status != 200:
+        raise ValueError(f'Login failed (HTTP {resp.status}): {error_detail(resp)}')
+    token = body.get('token') if isinstance(body, dict) else None
+    if not token:
+        raise ValueError('Login succeeded but no token was returned.')
+    return token
 
 
 def encode_session(cookie_or_token: str, user_agent: str | None = None, endpoint: str | None = None) -> str:
@@ -181,51 +242,106 @@ def parse_auth_headers(auth_data: str) -> tuple[dict, str]:
     }
 
     if is_cookie_session(credential):
-        endpoint = session['endpoint'] if session['endpoint'] in MONARCH_GRAPHQL_ENDPOINTS else DEFAULT_COOKIE_ENDPOINT
-        app_origin = endpoint.replace('://api.', '://app.').removesuffix('/graphql')
         headers['Cookie'] = credential
-        headers['Origin'] = app_origin
-        headers['Referer'] = app_origin + '/'
+        headers['Origin'] = APP_ORIGIN
+        headers['Referer'] = APP_ORIGIN + '/'
         for part in credential.split(';'):
             part = part.strip()
             if part.startswith('csrftoken='):
                 headers['X-Csrftoken'] = part.split('=', 1)[1]
                 break
     else:
-        endpoint = LEGACY_TOKEN_ENDPOINT
         headers['Authorization'] = f'Token {credential}'
 
-    return headers, endpoint
+    return headers, API_ENDPOINT
+
+
+def set_cookie(cookie_header: str, name: str, value: str) -> str:
+    """Return cookie_header with `name` set to `value` (replacing any existing value)."""
+    parts = [p.strip() for p in cookie_header.split(';') if p.strip() and not p.strip().startswith(name + '=')]
+    return '; '.join([*parts, f'{name}={value}'])
+
+
+async def refresh_csrf(headers: dict) -> None:
+    """Get a CSRF token the way Monarch's web app does and add it to `headers`.
+
+    The web app calls GET /auth/csrf/ on load, which sets a `csrftoken` cookie, then
+    echoes it in an X-CSRFToken header. Django (Monarch's backend) requires that pair
+    for cookie-authenticated POSTs. Browsers sometimes don't have the cookie (expired,
+    cleared), which shows up as "CSRF Failed: CSRF cookie not set".
+    """
+    csrf_headers = {k: v for k, v in headers.items() if k in ('Cookie', 'User-Agent', 'Origin', 'Referer', 'Client-Platform')}
+    resp = await http_request('GET', CSRF_ENDPOINT, headers=csrf_headers)
+    token = resp.cookies.get('csrftoken')
+    if not resp.ok or not token:
+        raise ValueError(f'Could not get a CSRF token from Monarch (HTTP {resp.status}).')
+    headers['Cookie'] = set_cookie(headers['Cookie'], 'csrftoken', token)
+    headers['X-Csrftoken'] = token
+
+
+def is_csrf_failure(resp: HttpResponse) -> bool:
+    return resp.status == 403 and 'csrf' in error_detail(resp).lower()
 
 
 async def monarch_graphql(token_or_cookie: str, query: str, variables: dict | None = None) -> dict:
     """Execute a GraphQL query against Monarch supporting both Cookie and Token auth."""
     headers, endpoint = parse_auth_headers(token_or_cookie)
     payload = {'query': query, 'variables': variables or {}}
+    uses_cookies = 'Cookie' in headers
 
-    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
-        async with session.post(endpoint, json=payload, headers=headers) as resp:
-            if resp.status in (401, 403):
-                raise AuthError(f'Monarch rejected the session (HTTP {resp.status}).')
-            if not resp.ok:
-                raise ValueError(f'GraphQL HTTP {resp.status}: {resp.reason}')
-            try:
-                data = await resp.json(content_type=None)
-            except Exception:
-                raise ValueError(f'GraphQL returned non-JSON response (HTTP {resp.status}).') from None
-            if data.get('errors'):
-                messages = [e.get('message', str(e)) for e in data['errors']]
-                if any('unauthenticated' in m.lower() or 'not authenticated' in m.lower() for m in messages):
-                    raise AuthError('Monarch session is not authenticated.')
-                raise ValueError(f'GraphQL errors: {messages}')
-            return data
+    if uses_cookies and 'X-Csrftoken' not in headers:
+        await refresh_csrf(headers)
+    resp = await http_request('POST', endpoint, json=payload, headers=headers)
+    if uses_cookies and is_csrf_failure(resp):
+        # Token was stale or rotated: fetch a fresh one and try once more.
+        await refresh_csrf(headers)
+        resp = await http_request('POST', endpoint, json=payload, headers=headers)
+
+    if resp.status in (401, 403):
+        detail = error_detail(resp)
+        if resp.status == 401 or looks_like_auth_failure(detail):
+            raise AuthError(f'HTTP {resp.status}: {detail}')
+        raise ValueError(f'Monarch refused the request (HTTP 403: {detail})')
+    if 300 <= resp.status < 400:
+        raise ValueError(f'Monarch API redirected (HTTP {resp.status}) to {resp.headers.get("Location")}')
+    if not resp.ok:
+        raise ValueError(f'Monarch API error (HTTP {resp.status}): {error_detail(resp)}')
+    try:
+        data = resp.json()
+    except ValueError:
+        raise ValueError(f'Monarch returned a non-JSON response (HTTP {resp.status}).') from None
+    if data.get('errors'):
+        messages = [e.get('message', str(e)) for e in data['errors']]
+        if any('unauthenticated' in m.lower() or 'not authenticated' in m.lower() for m in messages):
+            raise AuthError('Monarch session is not authenticated.')
+        raise ValueError(f'GraphQL errors: {messages}')
+    return data
+
+
+def error_detail(resp: HttpResponse) -> str:
+    """Short, human-readable reason from an error response (never echoes request headers)."""
+    text = resp.text()
+    try:
+        body = json.loads(text)
+        if isinstance(body, dict) and body.get('detail'):
+            return str(body['detail'])[:200]
+    except json.JSONDecodeError:
+        pass
+    if 'cloudflare' in text.lower():
+        return 'blocked by Cloudflare bot protection'
+    return ' '.join(text.split())[:120] or resp.reason or 'no details'
+
+
+def looks_like_auth_failure(detail: str) -> bool:
+    d = detail.lower()
+    return any(k in d for k in ('credentials', 'authenticat', 'invalid token', 'session'))
 
 
 async def get_exchange_rate() -> float:
-    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
-        async with session.get(EXCHANGE_API) as r:
-            r.raise_for_status()
-            data = await r.json(content_type=None)
+    resp = await http_request('GET', EXCHANGE_API)
+    if not resp.ok:
+        raise ValueError(f'Exchange rate API error (HTTP {resp.status})')
+    data = resp.json()
     rate = (data.get('rates') or {}).get('USD')
     if not isinstance(rate, (int, float)) or rate <= 0:
         raise ValueError('Exchange rate API did not return a valid JPY→USD rate.')
@@ -233,10 +349,20 @@ async def get_exchange_rate() -> float:
 
 # ── Action Handlers ───────────────────────────────────────────────────────────
 
-def _session_expired() -> dict:
-    keychain_delete()
-    return {'success': False, 'error': 'token_expired',
-            'message': 'Monarch session expired. Paste a fresh session cookie in the extension popup.'}
+def _session_rejected(err: AuthError, from_browser: bool) -> dict:
+    """Monarch didn't accept the session we sent.
+
+    Only the Keychain copy is deleted, and only when it was the one that failed, so a bad
+    browser cookie never wipes a working saved session.
+    """
+    if from_browser:
+        message = ('Monarch did not accept the session from this browser '
+                   f'({err}). Log out of Monarch and back in, then click Connect.')
+    else:
+        keychain_delete()
+        message = f'Saved Monarch session expired ({err}). Log into Monarch in this browser, then click Connect.'
+    return {'success': False, 'error': 'token_expired', 'session_source': 'browser' if from_browser else 'keychain',
+            'detail': str(err), 'message': message}
 
 
 async def handle_ping() -> dict:
@@ -263,10 +389,11 @@ async def handle_login(email: str, password: str, mfa_secret: str | None = None)
             return {'success': False, 'error': 'mfa_required', 'message': 'MFA required. Provide your TOTP secret key or current 6-digit code.'}
         return {'success': False, 'error': 'login_failed', 'message': msg}
     except Exception as e:
-        return {'success': False, 'error': 'login_error', 'message': f'{type(e).__name__}: {e}'}
+        return {'success': False, 'error': 'login_error', 'message': describe(e)}
 
 
 async def handle_get_accounts(token: str | None = None) -> dict:
+    from_browser = token is not None
     token = token or keychain_load()
     if not token:
         return {'success': False, 'error': 'not_logged_in', 'message': 'Not logged in. Save session cookie or token first.'}
@@ -283,10 +410,10 @@ async def handle_get_accounts(token: str | None = None) -> dict:
     '''
     try:
         data = await monarch_graphql(token, query)
-    except AuthError:
-        return _session_expired()
+    except AuthError as e:
+        return _session_rejected(e, from_browser)
     except Exception as e:
-        return {'success': False, 'error': 'fetch_failed', 'message': str(e)}
+        return {'success': False, 'error': 'fetch_failed', 'message': describe(e)}
 
     all_accounts = (data.get('data') or {}).get('accounts') or []
     manual = [
@@ -316,6 +443,7 @@ def validate_jpy_balance(value) -> float:
 
 
 async def handle_sync(jpy_balance: float, account_id: str | None = None, token: str | None = None) -> dict:
+    from_browser = token is not None
     token = token or keychain_load()
     if not token:
         return {'success': False, 'error': 'not_logged_in', 'message': 'Not logged in. Open the extension popup and log in.'}
@@ -323,7 +451,7 @@ async def handle_sync(jpy_balance: float, account_id: str | None = None, token: 
     try:
         rate = await get_exchange_rate()
     except Exception as e:
-        return {'success': False, 'error': 'exchange_rate_failed', 'message': str(e)}
+        return {'success': False, 'error': 'exchange_rate_failed', 'message': describe(e)}
 
     usd_balance = round(jpy_balance * rate, 2)
 
@@ -359,10 +487,10 @@ async def handle_sync(jpy_balance: float, account_id: str | None = None, token: 
     '''
     try:
         data = await monarch_graphql(token, mutation, {'input': {'id': str(account_id), 'displayBalance': float(usd_balance)}})
-    except AuthError:
-        return _session_expired()
+    except AuthError as e:
+        return _session_rejected(e, from_browser)
     except Exception as e:
-        return {'success': False, 'error': 'update_failed', 'message': str(e)}
+        return {'success': False, 'error': 'update_failed', 'message': describe(e)}
 
     result = (data.get('data') or {}).get('updateAccount') or {}
     if result.get('errors'):

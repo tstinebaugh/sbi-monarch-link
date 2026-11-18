@@ -32,23 +32,66 @@ function callNativeHost(message) {
 
 // ── Monarch session from browser cookies ──────────────────────────────────────
 
-async function readBrowserSession() {
+// Cookies the browser would send to Monarch's API, per endpoint.
+async function apiCookies() {
+  const out = [];
   for (const endpoint of MONARCH_GRAPHQL_ENDPOINTS) {
-    // getAll({url}) returns exactly the cookies the browser would send to the API,
+    // getAll({url}) returns exactly the cookies the browser would send to that URL,
     // including HttpOnly ones the web page itself can't read.
-    const cookies = await chrome.cookies.getAll({ url: endpoint });
-    if (cookies.some(c => c.name === 'session_id')) {
-      return {
-        cookie: cookies.map(c => `${c.name}=${c.value}`).join('; '),
+    out.push({ endpoint, cookies: await chrome.cookies.getAll({ url: endpoint }) });
+  }
+  return out;
+}
+
+// Cookie names only (never values), for the popup's debug log.
+async function cookieReport() {
+  const parts = [];
+  for (const { endpoint, cookies } of await apiCookies()) {
+    const counts = {};
+    for (const c of cookies) counts[c.name] = (counts[c.name] || 0) + 1;
+    const names = Object.entries(counts).map(([n, k]) => (k > 1 ? `${n}×${k}` : n)).join(', ');
+    parts.push(`${new URL(endpoint).host}: ${names || 'no cookies'}`);
+  }
+  return parts.join(' | ');
+}
+
+// Every distinct Monarch session the browser holds, best guess first. Usually there is
+// exactly one; an old session_id left on the legacy domain or a parent domain is why
+// we try candidates instead of trusting the first cookie we see.
+async function browserSessionCandidates() {
+  const candidates = [];
+  const seen = new Set();
+  for (const { endpoint, cookies } of await apiCookies()) {
+    const sessions = cookies.filter(c => c.name === 'session_id');
+    // Host-only and more specific cookies first, then the ones that live longest.
+    sessions.sort((a, b) => (b.hostOnly - a.hostOnly) || (b.domain.length - a.domain.length) ||
+                            ((b.expirationDate || 0) - (a.expirationDate || 0)));
+    for (const sess of sessions) {
+      if (seen.has(sess.value)) continue;
+      seen.add(sess.value);
+      // One cookie per name: the chosen session_id plus the most specific of everything else.
+      const byName = new Map([['session_id', sess]]);
+      for (const c of cookies) {
+        const prev = byName.get(c.name);
+        if (!prev || (c.name !== 'session_id' && c.domain.length > prev.domain.length)) byName.set(c.name, c);
+      }
+      const jar = [...byName.values()];
+      candidates.push({
+        cookie: jar.map(c => `${c.name}=${c.value}`).join('; '),
         endpoint,
         user_agent: navigator.userAgent,
-        fingerprint: await sha256(
-          endpoint + '|' + cookies.filter(c => AUTH_COOKIES.includes(c.name)).map(c => `${c.name}=${c.value}`).sort().join(';')
-        ),
-      };
+        fingerprint: await sha256(jar.filter(c => AUTH_COOKIES.includes(c.name)).map(c => `${c.name}=${c.value}`).sort().join(';')),
+      });
     }
   }
-  return null;
+  // Put the session that worked last time first.
+  const { goodFingerprint } = await chrome.storage.session.get('goodFingerprint');
+  candidates.sort((a, b) => (b.fingerprint === goodFingerprint) - (a.fingerprint === goodFingerprint));
+  return candidates;
+}
+
+async function readBrowserSession() {
+  return (await browserSessionCandidates())[0] || null;
 }
 
 async function sha256(text) {
@@ -74,21 +117,33 @@ async function storeBrowserSession(session, { force = false } = {}) {
   return res;
 }
 
-// Attach the live browser session to a host request when there is one.
-async function withSession(message) {
-  const session = await readBrowserSession();
-  if (!session) return message;
-  storeBrowserSession(session).catch(() => {});
-  const { fingerprint, ...wire } = session;
-  return { ...message, session: wire };
+// Run a host request with the browser's Monarch session, trying each candidate session
+// until Monarch accepts one. Falls back to the Keychain copy when the browser has none.
+async function callWithSession(message) {
+  const candidates = await browserSessionCandidates();
+  if (!candidates.length) return callNativeHost(message);
+  let res;
+  for (const session of candidates) {
+    const { fingerprint, ...wire } = session;
+    res = await callNativeHost({ ...message, session: wire });
+    if (!(res && res.error === 'token_expired')) {
+      if (res && res.success) {
+        await chrome.storage.session.set({ goodFingerprint: fingerprint });
+        storeBrowserSession(session).catch(() => {});
+      }
+      return res;
+    }
+  }
+  if (res && candidates.length > 1) res.message += ` (tried ${candidates.length} browser sessions)`;
+  return res;
 }
 
 // Pick up logins automatically: log into Monarch in any tab and the extension is connected.
 chrome.cookies.onChanged.addListener(async ({ cookie, removed }) => {
   if (removed || cookie.name !== 'session_id') return;
   if (!/(^|\.)monarch(money)?\.com$/.test(cookie.domain.replace(/^\./, ''))) return;
-  const session = await readBrowserSession();
-  if (session) storeBrowserSession(session).catch(() => {});
+  // A fresh login: verify it and store it once Monarch accepts it.
+  callWithSession({ action: 'get_accounts' }).catch(() => {});
 });
 
 // ── FX rate ───────────────────────────────────────────────────────────────────
@@ -107,11 +162,11 @@ async function getFxRate() {
 // ── Sync ──────────────────────────────────────────────────────────────────────
 
 async function syncBalance(jpyBalance, accountId) {
-  const res = await callNativeHost(await withSession({
+  const res = await callWithSession({
     action: 'sync',
     jpy_balance: jpyBalance,
     account_id: accountId || null,
-  }));
+  });
   if (res && res.success) {
     await chrome.storage.local.set({
       monarchAccountId: res.account_id,
@@ -137,6 +192,7 @@ async function getStatus() {
   }
   return {
     success: true,
+    cookieReport: await cookieReport().catch(e => `unavailable: ${e.message}`),
     extensionId: chrome.runtime.id,
     hostInstalled: !!(host && host.success),
     hostMessage: host && host.message,
@@ -153,9 +209,10 @@ async function connectMonarch() {
     return { success: false, error: 'needs_browser_login',
              message: 'Log into Monarch in the tab that just opened. The extension connects automatically.' };
   }
-  const saved = await storeBrowserSession(session, { force: true });
-  if (!saved || !saved.success) return saved || { success: false, message: 'No response from native host.' };
-  return callNativeHost(await withSession({ action: 'get_accounts' }));
+  // Only store a session after Monarch has accepted it (callWithSession does that).
+  const res = await callWithSession({ action: 'get_accounts' });
+  if (res && !res.success) res.cookieReport = await cookieReport();
+  return res;
 }
 
 // ── Message router ────────────────────────────────────────────────────────────
@@ -163,7 +220,7 @@ async function connectMonarch() {
 const handlers = {
   getStatus: () => getStatus(),
   connectMonarch: () => connectMonarch(),
-  getMonarchAccounts: async () => callNativeHost(await withSession({ action: 'get_accounts' })),
+  getMonarchAccounts: () => callWithSession({ action: 'get_accounts' }),
   saveMonarchToken: (req) => callNativeHost({ action: 'save_token', token: req.token }),
   getFxRate: async () => ({ success: true, ...(await getFxRate()) }),
   syncToMonarch: (req) => syncBalance(req.jpy_balance, req.account_id),
