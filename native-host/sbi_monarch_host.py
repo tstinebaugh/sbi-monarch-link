@@ -35,10 +35,24 @@ from keyring.errors import KeyringError, PasswordDeleteError
 MONARCH_LOGIN   = 'https://api.monarchmoney.com/auth/login/'
 EXCHANGE_API    = 'https://open.er-api.com/v6/latest/JPY'
 
+HOST_VERSION = '1.3.0'
+
 KEYCHAIN_SERVICE = 'sbi-monarch-link'
 KEYCHAIN_ACCOUNT = 'monarch_session_token'
 
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=20)
+
+# GraphQL endpoints a cookie session may be sent to. The browser extension tells us
+# which one the session belongs to; anything else is rejected so a session cookie
+# can never be forwarded to an arbitrary host.
+MONARCH_GRAPHQL_ENDPOINTS = (
+    'https://api.monarch.com/graphql',
+    'https://api.monarchmoney.com/graphql',
+)
+DEFAULT_COOKIE_ENDPOINT = MONARCH_GRAPHQL_ENDPOINTS[0]
+LEGACY_TOKEN_ENDPOINT = 'https://api.monarchmoney.com/graphql'
+DEFAULT_USER_AGENT = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+                      '(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36')
 
 # Accounts whose name contains one of these are auto-selected when no account
 # ID has been chosen yet.
@@ -123,29 +137,63 @@ async def monarch_login(email: str, password: str, mfa_secret: str | None = None
             return token
 
 
+def encode_session(cookie_or_token: str, user_agent: str | None = None, endpoint: str | None = None) -> str:
+    """Serialize what we store in the Keychain.
+
+    Sessions captured from the browser carry the browser's User-Agent (Cloudflare ties
+    some cookies to it) and the API endpoint the cookies belong to. A bare string is
+    kept for manually pasted cookies / legacy tokens.
+    """
+    if endpoint is not None and endpoint not in MONARCH_GRAPHQL_ENDPOINTS:
+        raise ValueError(f'Unsupported Monarch endpoint: {endpoint}')
+    if not user_agent and not endpoint:
+        return cookie_or_token
+    return json.dumps({'v': 1, 'cookie': cookie_or_token, 'user_agent': user_agent, 'endpoint': endpoint})
+
+
+def decode_session(stored: str) -> dict:
+    """Inverse of encode_session. Returns {'credential', 'user_agent', 'endpoint'}."""
+    if stored.startswith('{'):
+        try:
+            data = json.loads(stored)
+            return {'credential': data.get('cookie') or '',
+                    'user_agent': data.get('user_agent'),
+                    'endpoint': data.get('endpoint')}
+        except json.JSONDecodeError:
+            pass
+    return {'credential': stored, 'user_agent': None, 'endpoint': None}
+
+
+def is_cookie_session(credential: str) -> bool:
+    return 'session_id=' in credential or 'csrftoken=' in credential
+
+
 def parse_auth_headers(auth_data: str) -> tuple[dict, str]:
-    """Returns (headers, endpoint_url) supporting both modern Cookie sessions and legacy Tokens."""
+    """Returns (headers, endpoint_url) for a stored session (cookie or legacy token)."""
+    session = decode_session(auth_data)
+    credential = session['credential']
     headers = {
         'Accept': '*/*',
         'Content-Type': 'application/json',
         'Client-Platform': 'web',
         'monarch-client': 'monarch-core-web-app-graphql',
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
+        'User-Agent': session['user_agent'] or DEFAULT_USER_AGENT,
     }
 
-    if 'session_id=' in auth_data or 'csrftoken=' in auth_data:
-        endpoint = 'https://api.monarch.com/graphql'
-        headers['Cookie'] = auth_data
-        headers['Origin'] = 'https://app.monarch.com'
-        headers['Referer'] = 'https://app.monarch.com/'
-        for part in auth_data.split(';'):
+    if is_cookie_session(credential):
+        endpoint = session['endpoint'] if session['endpoint'] in MONARCH_GRAPHQL_ENDPOINTS else DEFAULT_COOKIE_ENDPOINT
+        app_origin = endpoint.replace('://api.', '://app.').removesuffix('/graphql')
+        headers['Cookie'] = credential
+        headers['Origin'] = app_origin
+        headers['Referer'] = app_origin + '/'
+        for part in credential.split(';'):
             part = part.strip()
             if part.startswith('csrftoken='):
                 headers['X-Csrftoken'] = part.split('=', 1)[1]
                 break
     else:
-        endpoint = 'https://api.monarchmoney.com/graphql'
-        headers['Authorization'] = f'Token {auth_data}'
+        endpoint = LEGACY_TOKEN_ENDPOINT
+        headers['Authorization'] = f'Token {credential}'
 
     return headers, endpoint
 
@@ -196,6 +244,7 @@ async def handle_ping() -> dict:
     return {
         'success': True,
         'has_session': token is not None,
+        'host_version': HOST_VERSION,
         'message': 'Native host running' + (' (logged in)' if token else ' (not logged in)')
     }
 
@@ -217,8 +266,8 @@ async def handle_login(email: str, password: str, mfa_secret: str | None = None)
         return {'success': False, 'error': 'login_error', 'message': f'{type(e).__name__}: {e}'}
 
 
-async def handle_get_accounts() -> dict:
-    token = keychain_load()
+async def handle_get_accounts(token: str | None = None) -> dict:
+    token = token or keychain_load()
     if not token:
         return {'success': False, 'error': 'not_logged_in', 'message': 'Not logged in. Save session cookie or token first.'}
 
@@ -266,8 +315,8 @@ def validate_jpy_balance(value) -> float:
     return jpy
 
 
-async def handle_sync(jpy_balance: float, account_id: str | None = None) -> dict:
-    token = keychain_load()
+async def handle_sync(jpy_balance: float, account_id: str | None = None, token: str | None = None) -> dict:
+    token = token or keychain_load()
     if not token:
         return {'success': False, 'error': 'not_logged_in', 'message': 'Not logged in. Open the extension popup and log in.'}
 
@@ -282,7 +331,7 @@ async def handle_sync(jpy_balance: float, account_id: str | None = None) -> dict
     # writing a balance to the wrong account silently corrupts the user's data.
     account_name = account_id
     if not account_id:
-        data = await handle_get_accounts()
+        data = await handle_get_accounts(token)
         if not data['success']:
             return data
         best = pick_default_account(data['accounts'])
@@ -331,21 +380,43 @@ async def handle_sync(jpy_balance: float, account_id: str | None = None) -> dict
     }
 
 
-async def handle_save_token(token: str) -> dict:
+async def handle_save_token(token: str, user_agent: str | None = None, endpoint: str | None = None) -> dict:
     clean_token = (token or '').strip()
     if not clean_token:
         return {'success': False, 'error': 'missing_token', 'message': 'Token cannot be empty.'}
-    if keychain_save(clean_token):
-        return {'success': True, 'message': 'Session token saved to Apple Keychain!'}
+    try:
+        stored = encode_session(clean_token, user_agent or None, endpoint or None)
+    except ValueError as e:
+        return {'success': False, 'error': 'invalid_endpoint', 'message': str(e)}
+    if keychain_save(stored):
+        return {'success': True, 'message': 'Monarch session saved to Apple Keychain.'}
     return {'success': False, 'error': 'keychain_save_failed', 'message': 'Could not save token to Apple Keychain.'}
+
+
+def session_from_request(request: dict) -> str | None:
+    """A session the extension read from the browser's Monarch cookies, sent with the request.
+
+    Preferred over the Keychain copy because it is always the browser's current session.
+    Raises ValueError for a malformed session or an unknown endpoint.
+    """
+    session = request.get('session')
+    if not session:
+        return None
+    if not isinstance(session, dict) or not isinstance(session.get('cookie'), str) or not session['cookie'].strip():
+        raise ValueError('Malformed browser session.')
+    return encode_session(session['cookie'].strip(), session.get('user_agent'), session.get('endpoint'))
 
 
 async def handle(request: dict) -> dict:
     action = request.get('action')
+    try:
+        browser_session = session_from_request(request)
+    except ValueError as e:
+        return {'success': False, 'error': 'invalid_session', 'message': str(e)}
     if action == 'ping':
         return await handle_ping()
     if action == 'save_token':
-        return await handle_save_token(request.get('token', ''))
+        return await handle_save_token(request.get('token', ''), request.get('user_agent'), request.get('endpoint'))
     if action == 'login':
         return await handle_login(
             request.get('email', ''),
@@ -353,13 +424,13 @@ async def handle(request: dict) -> dict:
             request.get('mfa_secret') or None
         )
     if action == 'get_accounts':
-        return await handle_get_accounts()
+        return await handle_get_accounts(browser_session)
     if action == 'sync':
         try:
             jpy = validate_jpy_balance(request.get('jpy_balance'))
         except (TypeError, ValueError) as e:
             return {'success': False, 'error': 'invalid_jpy', 'message': str(e)}
-        return await handle_sync(jpy, request.get('account_id') or None)
+        return await handle_sync(jpy, request.get('account_id') or None, browser_session)
     return {'success': False, 'error': 'unknown_action', 'message': f'Unknown action: {action}'}
 
 # ── Native Messaging I/O ──────────────────────────────────────────────────────

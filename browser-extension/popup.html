@@ -1,186 +1,263 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>SBI ➔ Monarch Link</title>
+  <title>SBI → Monarch</title>
   <style>
     :root {
-      --bg: #0f172a;
-      --card-bg: #1e293b;
-      --accent: #38bdf8;
-      --text: #f8fafc;
-      --text-muted: #94a3b8;
-      --success: #4ade80;
-      --error: #f87171;
-      --border: #334155;
+      --bg: #f6f7fb;
+      --surface: #ffffff;
+      --surface-2: #f1f3f9;
+      --border: #e3e6ef;
+      --text: #111827;
+      --muted: #6b7280;
+      --accent: #4f46e5;
+      --accent-hover: #4338ca;
+      --accent-soft: #eef2ff;
+      --on-accent: #ffffff;
+      --success: #15803d;
+      --success-soft: #dcfce7;
+      --warn: #b45309;
+      --warn-soft: #fef3c7;
+      --danger: #b91c1c;
+      --danger-soft: #fee2e2;
+      --code-bg: #0f172a;
+      --code-text: #e2e8f0;
+      --radius: 12px;
     }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b1020;
+        --surface: #131a2e;
+        --surface-2: #1a2238;
+        --border: #263049;
+        --text: #e5e7eb;
+        --muted: #94a3b8;
+        --accent: #818cf8;
+        --accent-hover: #a5b4fc;
+        --accent-soft: #1e2350;
+        --on-accent: #0b1020;
+        --success: #4ade80;
+        --success-soft: #0f2e1d;
+        --warn: #fbbf24;
+        --warn-soft: #3a2a06;
+        --danger: #f87171;
+        --danger-soft: #3b1111;
+        --code-bg: #05070f;
+      }
+    }
+
     * { box-sizing: border-box; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      width: 340px;
+      width: 360px;
       margin: 0;
       padding: 14px;
       background: var(--bg);
       color: var(--text);
-      font-size: 13px;
+      font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
     }
-    .header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 12px;
-      padding-bottom: 8px;
-      border-bottom: 1px solid var(--border);
+    [hidden] { display: none !important; }
+
+    /* Header */
+    .header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .header img { width: 28px; height: 28px; border-radius: 7px; }
+    .header h1 { font-size: 15px; font-weight: 650; margin: 0; flex: 1; letter-spacing: -0.01em; }
+    .pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px;
+      background: var(--surface-2); color: var(--muted);
     }
-    h2 { font-size: 14px; margin: 0; color: var(--accent); display: flex; align-items: center; gap: 6px; }
+    .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .pill.ok { background: var(--success-soft); color: var(--success); }
+    .pill.warn { background: var(--warn-soft); color: var(--warn); }
+
+    /* Cards */
     .card {
-      background: var(--card-bg);
-      border-radius: 8px;
-      padding: 11px;
-      margin-bottom: 10px;
+      background: var(--surface);
       border: 1px solid var(--border);
-    }
-    label {
-      display: block;
-      font-size: 10px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      color: var(--text-muted);
-      margin-bottom: 3px;
-    }
-    input, select {
-      width: 100%;
-      padding: 7px 8px;
-      border-radius: 5px;
-      border: 1px solid #475569;
-      background: var(--bg);
-      color: #fff;
-      font-size: 12px;
-      margin-bottom: 8px;
-    }
-    input:focus, select:focus { outline: none; border-color: var(--accent); }
-    button.btn {
-      width: 100%;
-      padding: 9px;
-      border-radius: 6px;
-      border: none;
-      font-weight: 600;
-      font-size: 12px;
-      cursor: pointer;
-      transition: opacity 0.2s;
-    }
-    button.btn:hover { opacity: 0.85; }
-    button.btn-primary { background: #0284c7; color: #fff; }
-    button.btn-success { background: #16a34a; color: #fff; }
-    button.btn-sm { padding: 6px 10px; font-size: 11px; }
-    .account-badge {
-      font-size: 11px;
-      padding: 6px 10px;
-      border-radius: 6px;
-      background: #1e293b;
-      border: 1px solid var(--border);
-      color: var(--accent);
+      border-radius: var(--radius);
+      padding: 12px;
       margin-bottom: 10px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
     }
-    .rate-badge {
-      font-size: 11px;
-      background: #0369a1;
-      color: #e0f2fe;
-      padding: 3px 8px;
-      border-radius: 4px;
-      display: inline-block;
-      margin-bottom: 6px;
+    .eyebrow {
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+      color: var(--muted); margin-bottom: 4px;
     }
-    .result-box { font-size: 20px; font-weight: bold; color: var(--success); margin-top: 2px; }
-    .status { font-size: 11px; margin-top: 8px; text-align: center; word-break: break-word; min-height: 16px; }
-    .help-text { font-size: 10px; color: #94a3b8; margin-top: -4px; margin-bottom: 8px; line-height: 1.4; }
-    .error-box {
-      background: #450a0a;
-      border: 1px solid #7f1d1d;
-      border-radius: 6px;
-      padding: 8px;
-      font-size: 10px;
-      color: #fca5a5;
-      white-space: pre-wrap;
-      word-break: break-all;
-      margin-bottom: 8px;
+    .chip {
+      text-transform: none; letter-spacing: 0; font-weight: 500;
+      font-size: 11px; padding: 1px 7px; border-radius: 999px;
+      background: var(--surface-2); color: var(--muted);
     }
-    .row { display: flex; gap: 6px; }
-    .row .btn { flex: 1; }
-    #loginIndicator {
-      font-size: 10px;
-      padding: 2px 8px;
-      border-radius: 10px;
-      background: #334155;
-      color: #94a3b8;
+    .chip.live { background: var(--success-soft); color: var(--success); }
+
+    /* Balance */
+    .amount-row { display: flex; align-items: baseline; gap: 4px; }
+    .currency { font-size: 22px; font-weight: 600; color: var(--muted); }
+    #jpyInput {
+      flex: 1; min-width: 0;
+      font-family: inherit; font-size: 26px; font-weight: 650; line-height: 1.2;
+      letter-spacing: -0.01em; font-variant-numeric: tabular-nums;
+      color: var(--text); background: transparent;
+      border: none; border-bottom: 1px dashed var(--border);
+      padding: 2px 0; outline: none;
+    }
+    #jpyInput:focus { border-bottom-color: var(--accent); }
+    .divider { display: flex; align-items: center; gap: 8px; color: var(--muted); margin: 10px 0 8px; font-size: 11px; }
+    .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+    #usdResult { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+    .meta { font-size: 11px; color: var(--muted); margin-top: 6px; }
+
+    /* Account */
+    .select-row { display: flex; gap: 6px; }
+    select {
+      flex: 1; min-width: 0;
+      font: inherit; color: var(--text);
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+      padding: 7px 8px; outline: none;
+    }
+    select:focus { border-color: var(--accent); }
+
+    /* Buttons */
+    button { font: inherit; cursor: pointer; }
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      border: none; border-radius: 9px; padding: 8px 12px; font-weight: 600;
+      transition: background .15s, opacity .15s;
+    }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .btn-primary { width: 100%; background: var(--accent); color: var(--on-accent); padding: 11px; font-size: 14px; }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+    .btn-secondary { background: var(--accent-soft); color: var(--accent); }
+    .btn-accent { background: var(--accent); color: var(--on-accent); }
+    .btn-accent:hover:not(:disabled) { background: var(--accent-hover); }
+    .btn-icon {
+      width: 34px; padding: 0; background: var(--surface-2); color: var(--muted);
+      border: 1px solid var(--border); border-radius: 8px; font-size: 15px;
+    }
+    .btn-icon:hover { color: var(--text); }
+
+    /* Status */
+    #status { min-height: 18px; margin-top: 8px; font-size: 12px; text-align: center; color: var(--muted); }
+    #status.error { color: var(--danger); }
+    #status.success { color: var(--success); }
+
+    /* Setup checklist */
+    .steps { list-style: none; margin: 0; padding: 0; }
+    .step { display: grid; grid-template-columns: 22px 1fr; gap: 8px; padding: 8px 0; }
+    .step + .step { border-top: 1px solid var(--border); }
+    .step-mark {
+      width: 20px; height: 20px; border-radius: 50%;
+      display: grid; place-items: center; font-size: 11px; font-weight: 700;
+      background: var(--surface-2); color: var(--muted);
+    }
+    .step.done .step-mark { background: var(--success-soft); color: var(--success); }
+    .step.todo .step-mark { background: var(--accent-soft); color: var(--accent); }
+    .step.done .step-body { display: none; }
+    .step-title { font-weight: 600; }
+    .step-body { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .step-body .btn { margin-top: 8px; }
+    .code {
+      position: relative; margin: 6px 0;
+      background: var(--code-bg); color: var(--code-text);
+      font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 8px 56px 8px 9px; border-radius: 8px; word-break: break-all;
+    }
+    .code button {
+      position: absolute; top: 6px; right: 6px;
+      font-size: 10px; padding: 3px 7px; border-radius: 6px; border: none;
+      background: #334155; color: #e2e8f0;
+    }
+
+    details { margin-top: 8px; }
+    summary { cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+    summary:hover { color: var(--text); }
+    .manual { display: flex; gap: 6px; margin-top: 6px; }
+    .manual input {
+      flex: 1; min-width: 0; font: inherit; color: var(--text);
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px;
+    }
+    .manual .btn { margin-top: 0; }
+    #debugBox {
+      margin-top: 6px; max-height: 110px; overflow-y: auto;
+      font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+      background: var(--surface-2); border-radius: 8px; padding: 6px 8px;
+      white-space: pre-wrap; word-break: break-all;
     }
   </style>
 </head>
 <body>
   <div class="header">
-    <h2>🏦 SBI ➔ Monarch Link</h2>
-    <span id="loginIndicator">○ Checking...</span>
+    <img src="icons/icon-48.png" alt="">
+    <h1>SBI → Monarch</h1>
+    <span id="connectionPill" class="pill">Checking…</span>
   </div>
 
-  <!-- Account Badge -->
-  <div class="account-badge">
-    <span>Monarch Account:</span>
-    <strong id="linkedAccountName">Not Connected</strong>
-  </div>
+  <!-- Setup checklist (shown until everything is configured) -->
+  <section id="setupCard" class="card" hidden>
+    <div class="eyebrow">Setup</div>
+    <ol class="steps">
+      <li id="stepHost" class="step">
+        <span class="step-mark">1</span>
+        <div>
+          <div class="step-title">Install the local helper</div>
+          <div class="step-body">
+            It keeps your Monarch session in Apple Keychain. Run this in the project folder:
+            <div class="code"><span id="installCmd"></span><button id="copyCmdBtn" type="button">Copy</button></div>
+            Then reopen this popup.
+          </div>
+        </div>
+      </li>
+      <li id="stepMonarch" class="step">
+        <span class="step-mark">2</span>
+        <div>
+          <div class="step-title">Connect Monarch</div>
+          <div class="step-body">
+            Uses the Monarch login already in this browser, so you never enter a password here.
+            <div><button id="connectBtn" class="btn btn-accent" type="button">Connect Monarch</button></div>
+            <details>
+              <summary>Paste a session cookie instead</summary>
+              <div class="manual">
+                <input type="password" id="monarchTokenInput" placeholder="session_id=…; csrftoken=…" autocomplete="off" aria-label="Monarch session cookie">
+                <button id="saveTokenBtn" class="btn btn-secondary" type="button">Save</button>
+              </div>
+            </details>
+          </div>
+        </div>
+      </li>
+    </ol>
+  </section>
 
-  <!-- Account Selector (shown when connected) -->
-  <div id="accountSelectSection" style="margin-bottom: 10px; display: none;">
-    <label for="accountSelect">Target Monarch Account:</label>
-    <select id="accountSelect"></select>
-    <button id="refreshAccountsBtn" class="btn btn-sm" style="background: #334155; color: #e2e8f0; width: auto; margin-top: -4px;">↻ Refresh</button>
-  </div>
-
-  <!-- Login Section (shown when not set up) -->
-  <div id="loginSection" class="card" style="display: none;">
-    <div id="nativeHostError" class="error-box" style="display: none;"></div>
-    <div id="setupNeeded" style="display: none; margin-bottom: 8px;">
-      <div class="help-text" style="color: #fbbf24;">
-        ⚠ First-time setup required:<br>
-        1. Run in Terminal:<br>
-        <code style="background:#020617; padding: 2px 4px; border-radius: 3px; font-size: 9px;">bash native-host/install_native_host.sh &lt;EXTENSION_ID&gt;</code><br>
-        2. Paste your Monarch session cookie below.
-      </div>
+  <!-- Balance -->
+  <section class="card">
+    <div class="eyebrow">SBI Shinsei · JPY <span id="sourceChip" class="chip">No balance yet</span></div>
+    <div class="amount-row">
+      <span class="currency">¥</span>
+      <input id="jpyInput" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="JPY balance">
     </div>
-    <label for="monarchTokenInput">Monarch Session Cookie / Token (Recommended):</label>
-    <input type="password" id="monarchTokenInput" placeholder="Paste session_id=... or token">
-    <button id="saveTokenBtn" class="btn btn-primary">Save Monarch Session</button>
-    <div class="help-text" style="margin-top: 4px;">💡 Copy from browser DevTools ➔ Network ➔ GraphQL ➔ Cookie header.</div>
-    <div style="margin-top: 10px; border-top: 1px dashed #334155; padding-top: 8px;">
-      <label for="monarchEmail">Or Login via Email & Password:</label>
-      <input type="email" id="monarchEmail" placeholder="your@email.com">
-      <label for="monarchPassword">Monarch Password:</label>
-      <input type="password" id="monarchPassword" placeholder="••••••••">
-      <label for="monarchMfa">MFA Secret Key / OTP (optional):</label>
-      <input type="text" id="monarchMfa" placeholder="6-digit code or TOTP secret">
-      <button id="loginMonarchBtn" class="btn btn-sm" style="background: #334155; color: #fff;">Log Into Monarch</button>
+    <div class="divider" id="rateLine">Fetching rate…</div>
+    <div class="eyebrow">Monarch · USD</div>
+    <div id="usdResult">$0.00</div>
+  </section>
+
+  <!-- Account -->
+  <section id="accountCard" class="card" hidden>
+    <div class="eyebrow"><label for="accountSelect">Monarch account</label></div>
+    <div class="select-row">
+      <select id="accountSelect"></select>
+      <button id="refreshAccountsBtn" class="btn btn-icon" type="button" title="Reload accounts" aria-label="Reload accounts">↻</button>
     </div>
-  </div>
+    <div class="meta" id="lastSyncLine"></div>
+  </section>
 
-  <!-- Balance Section -->
-  <div class="card">
-    <label for="jpyInput">Auto-Detected JPY Balance (¥):</label>
-    <input type="text" id="jpyInput" placeholder="Open SBI Shinsei to auto-detect...">
-    <div id="detectionSource" style="font-size: 10px; color: #38bdf8; margin-bottom: 6px;">🔍 Open SBI Shinsei PowerDirect to auto-parse balance.</div>
-    <div id="rateBadge" class="rate-badge">Fetching live FX rate...</div>
-    <label style="margin-top: 6px;">Converted USD Balance:</label>
-    <div id="usdResult" class="result-box">$0.00</div>
-  </div>
+  <button id="syncBtn" class="btn btn-primary" type="button" disabled>Sync to Monarch</button>
+  <div id="status" role="status" aria-live="polite"></div>
 
-  <button id="syncBtn" class="btn btn-success">⚡ Sync Balance to Monarch</button>
-  <div id="status" class="status"></div>
-
-  <div style="margin-top: 10px;">
-    <label style="font-size: 10px;">Debug Log:</label>
-    <div id="debugBox" style="font-size: 9px; color: #94a3b8; font-family: monospace; height: 70px; overflow-y: auto; background: #020617; padding: 5px; border-radius: 5px; border: 1px solid #1e293b; white-space: pre-wrap; word-break: break-all;"></div>
-  </div>
+  <details>
+    <summary>Debug log</summary>
+    <div id="debugBox"></div>
+  </details>
 
   <script src="popup.js"></script>
 </body>

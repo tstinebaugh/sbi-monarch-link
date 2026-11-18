@@ -74,7 +74,7 @@ def test_sync_without_account_and_no_match_does_not_write(monkeypatch):
     async def fake_rate():
         return 0.0067
 
-    async def fake_accounts():
+    async def fake_accounts(token=None):
         return {'success': True, 'accounts': [{'id': '1', 'displayName': 'Chase Checking', 'currentBalance': 0}]}
 
     async def fail_graphql(*a, **k):
@@ -142,3 +142,44 @@ def test_oversized_message_rejected(monkeypatch):
     monkeypatch.setattr(sys, 'stdin', stdin)
     with pytest.raises(ValueError):
         host.read_message()
+
+
+# ── Browser-captured sessions ─────────────────────────────────────────────────
+
+def test_browser_session_round_trip_uses_its_endpoint_and_user_agent():
+    stored = host.encode_session('session_id=a; csrftoken=b', 'TestUA/1.0', 'https://api.monarchmoney.com/graphql')
+    headers, endpoint = host.parse_auth_headers(stored)
+    assert endpoint == 'https://api.monarchmoney.com/graphql'
+    assert headers['User-Agent'] == 'TestUA/1.0'
+    assert headers['Origin'] == 'https://app.monarchmoney.com'
+    assert headers['X-Csrftoken'] == 'b'
+
+
+def test_plain_string_is_stored_unchanged():
+    assert host.encode_session('session_id=a') == 'session_id=a'
+
+
+def test_unknown_endpoint_rejected():
+    with pytest.raises(ValueError):
+        host.encode_session('session_id=a', 'UA', 'https://evil.example/graphql')
+
+
+def test_request_session_is_used_instead_of_keychain(monkeypatch):
+    monkeypatch.setattr(host, 'keychain_load', lambda: None)
+    seen = {}
+
+    async def fake_graphql(token, query, variables=None):
+        seen['token'] = token
+        return {'data': {'accounts': [{'id': '1', 'displayName': 'SBI', 'currentBalance': 1, 'isManual': True}]}}
+
+    monkeypatch.setattr(host, 'monarch_graphql', fake_graphql)
+    res = run(host.handle({'action': 'get_accounts',
+                           'session': {'cookie': 'session_id=fresh', 'user_agent': 'UA',
+                                       'endpoint': 'https://api.monarch.com/graphql'}}))
+    assert res['success'] and res['accounts'][0]['id'] == '1'
+    assert host.decode_session(seen['token'])['credential'] == 'session_id=fresh'
+
+
+def test_malformed_request_session_rejected():
+    res = run(host.handle({'action': 'get_accounts', 'session': {'cookie': 5}}))
+    assert res['error'] == 'invalid_session'

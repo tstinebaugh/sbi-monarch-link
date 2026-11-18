@@ -1,4 +1,4 @@
-// content.js - Minimal, silent DOM parser & floating sync banner for SBI Shinsei Bank
+// content.js — SBI Shinsei balance detection + floating sync banner
 
 let lastDetectedBalance = null;
 let exchangeRateUSD = null;
@@ -150,200 +150,244 @@ function extractYenNumber(str) {
   return null;
 }
 
-// Render floating sync banner on SBI Shinsei page
-async function renderFloatingBanner(jpyBalance) {
-  exchangeRateUSD = exchangeRateUSD || await getFXRate();
-  const usdAmount = (jpyBalance && exchangeRateUSD) ? (jpyBalance * exchangeRateUSD).toFixed(2) : null;
-  const usdText = usdAmount ? `$${Number(usdAmount).toLocaleString()} USD` : 'Calculating USD...';
+// ── Floating banner ───────────────────────────────────────────────────────────
+// Rendered inside a closed Shadow DOM so the bank's stylesheets can't restyle it (and
+// ours can't leak into the bank page). All dynamic text is set via textContent.
 
-  let banner = document.getElementById('sbi-monarch-banner');
-  
-  if (!banner) {
-    banner = document.createElement('div');
-    banner.id = 'sbi-monarch-banner';
-    banner.style.cssText = `
-      position: fixed;
-      bottom: 20px;
-      right: 20px;
-      z-index: 999999;
-      background: #0f172a;
-      color: #f8fafc;
-      border: 1px solid #38bdf8;
-      border-radius: 12px;
-      padding: 14px 18px;
-      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      font-size: 14px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    `;
-    document.body.appendChild(banner);
+const BANNER_CSS = `
+  :host { all: initial; }
+  .card {
+    --bg: #ffffff; --text: #111827; --muted: #6b7280; --border: #e3e6ef;
+    --accent: #4f46e5; --accent-hover: #4338ca; --on-accent: #fff;
+    --success: #15803d; --danger: #b91c1c; --soft: #f1f3f9;
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 14px;
+    box-shadow: 0 12px 32px -8px rgba(15, 23, 42, .35);
+    padding: 12px 14px; width: 260px;
+    animation: in .18s ease-out;
   }
-
-  if (jpyBalance) {
-    banner.innerHTML = `
-      <div>
-        <div style="font-weight: 600; color: #38bdf8; font-size: 13px;">🏦 SBI ➔ Monarch Money</div>
-        <div style="font-weight: bold; font-size: 15px; margin-top: 2px;">
-          ¥${jpyBalance.toLocaleString()} JPY <span style="color: #4ade80;">➔ ${usdText}</span>
-        </div>
-      </div>
-      <button id="sbi-monarch-quick-sync" style="
-        background: #0284c7;
-        color: white;
-        border: none;
-        padding: 8px 14px;
-        border-radius: 6px;
-        font-weight: 600;
-        cursor: pointer;
-        font-size: 13px;
-      ">Sync Now</button>
-      <button id="sbi-monarch-picker-btn" title="Pick balance on screen" style="
-        background: #334155;
-        color: #94a3b8;
-        border: none;
-        padding: 6px 10px;
-        border-radius: 6px;
-        font-size: 12px;
-        cursor: pointer;
-      ">🎯 Pick Element</button>
-      <span id="sbi-monarch-close" style="cursor: pointer; color: #64748b; font-size: 16px; margin-left: 4px;">✕</span>
-    `;
-
-    document.getElementById('sbi-monarch-quick-sync').onclick = async () => {
-      const btn = document.getElementById('sbi-monarch-quick-sync');
-      btn.innerText = 'Syncing...';
-      btn.disabled = true;
-
-      chrome.runtime.sendMessage({
-        action: 'syncBalanceFromBanner',
-        jpyBalance: jpyBalance
-      }, (response) => {
-        if (response && response.success) {
-          btn.innerText = '✓ Synced!';
-          btn.style.background = '#16a34a';
-        } else {
-          btn.innerText = 'Sync failed – open extension';
-          btn.title = (response && response.message) || 'No response from extension';
-          btn.style.background = '#dc2626';
-          btn.disabled = false;
-        }
-      });
-    };
-  } else {
-    banner.innerHTML = `
-      <div>
-        <div style="font-weight: 600; color: #38bdf8; font-size: 13px;">🏦 SBI ➔ Monarch Money</div>
-        <div style="font-size: 13px; margin-top: 2px; color: #94a3b8;">
-          Detecting balance on page...
-        </div>
-      </div>
-      <button id="sbi-monarch-rescan-btn" style="
-        background: #334155;
-        color: #e2e8f0;
-        border: none;
-        padding: 6px 10px;
-        border-radius: 6px;
-        font-size: 12px;
-        cursor: pointer;
-      ">🔍 Scan Page</button>
-      <button id="sbi-monarch-picker-btn" style="
-        background: #0284c7;
-        color: white;
-        border: none;
-        padding: 8px 14px;
-        border-radius: 6px;
-        font-weight: 600;
-        cursor: pointer;
-        font-size: 13px;
-      ">🎯 Click Balance on Screen</button>
-      <span id="sbi-monarch-close" style="cursor: pointer; color: #64748b; font-size: 16px; margin-left: 4px;">✕</span>
-    `;
-
-    const rescanBtn = document.getElementById('sbi-monarch-rescan-btn');
-    if (rescanBtn) {
-      rescanBtn.onclick = () => runScanOnce();
+  @media (prefers-color-scheme: dark) {
+    .card {
+      --bg: #131a2e; --text: #e5e7eb; --muted: #94a3b8; --border: #263049;
+      --accent: #818cf8; --accent-hover: #a5b4fc; --on-accent: #0b1020;
+      --success: #4ade80; --danger: #f87171; --soft: #1a2238;
     }
   }
+  @keyframes in { from { opacity: 0; transform: translateY(6px); } }
+  .top { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+  .brand { flex: 1; display: flex; align-items: center; gap: 7px; font-weight: 650; font-size: 12px; color: var(--muted); }
+  .brand svg { width: 18px; height: 18px; }
+  button { font: inherit; cursor: pointer; }
+  .icon {
+    border: none; background: none; color: var(--muted); padding: 2px 5px; border-radius: 6px; font-size: 13px;
+  }
+  .icon:hover { background: var(--soft); color: var(--text); }
+  .jpy { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .usd { font-size: 22px; font-weight: 650; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+  .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .sub.ok { color: var(--success); }
+  .sub.err { color: var(--danger); }
+  .actions { display: flex; gap: 6px; margin-top: 10px; }
+  .btn {
+    flex: 1; border: none; border-radius: 9px; padding: 8px 10px; font-weight: 600;
+    background: var(--accent); color: var(--on-accent);
+  }
+  .btn:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn:disabled { opacity: .55; cursor: default; }
+  .btn.secondary { background: var(--soft); color: var(--text); }
+`;
 
-  document.getElementById('sbi-monarch-close').onclick = () => banner.remove();
-  
-  const pickerBtn = document.getElementById('sbi-monarch-picker-btn');
-  if (pickerBtn) {
-    pickerBtn.onclick = enableElementPicker;
+const LOGO_SVG = `<svg viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+  <stop offset="0" stop-color="#6366f1"/><stop offset="1" stop-color="#14b8a6"/></linearGradient></defs>
+  <rect width="64" height="64" rx="14" fill="url(#g)"/>
+  <path d="M18 34h22m-7-8 8 8-8 8" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="47" cy="34" r="5" fill="#fff"/></svg>`;
+
+let bannerRoot = null;
+let bannerDismissed = false;
+let bannerView = { state: 'detecting' };
+
+function ensureBanner() {
+  if (bannerDismissed) return null;
+  if (bannerRoot && bannerRoot.host.isConnected) return bannerRoot;
+  const host = document.createElement('div');
+  host.id = 'sbi-monarch-banner';
+  host.style.cssText = 'position:fixed;right:20px;bottom:20px;z-index:2147483646;';
+  bannerRoot = host.attachShadow({ mode: 'closed' });
+  bannerRoot.innerHTML = `<style>${BANNER_CSS}</style>
+    <div class="card" role="region" aria-label="SBI to Monarch sync">
+      <div class="top">
+        <span class="brand">${LOGO_SVG}SBI → Monarch</span>
+        <button class="icon" data-act="pick" title="Pick the balance on the page" aria-label="Pick the balance on the page">🎯</button>
+        <button class="icon" data-act="close" title="Hide" aria-label="Hide">✕</button>
+      </div>
+      <div class="content"></div>
+      <div class="actions"></div>
+    </div>`;
+  bannerRoot.addEventListener('click', onBannerClick);
+  document.body.appendChild(host);
+  return bannerRoot;
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function button(label, act, { secondary = false, disabled = false } = {}) {
+  const b = el('button', 'btn' + (secondary ? ' secondary' : ''), label);
+  b.dataset.act = act;
+  b.disabled = disabled;
+  return b;
+}
+
+const fmtUSD = (n) => Number(n).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+
+function timeAgo(ts) {
+  const mins = Math.round((Date.now() - ts) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
+}
+
+async function renderBanner(view) {
+  bannerView = { ...bannerView, ...view };
+  const root = ensureBanner();
+  if (!root) return;
+  const v = bannerView;
+  const content = root.querySelector('.content');
+  const actions = root.querySelector('.actions');
+  content.replaceChildren();
+  actions.replaceChildren();
+
+  if (v.state === 'detecting') {
+    content.append(
+      el('div', 'usd', 'Balance not found'),
+      el('div', 'sub' + (v.message ? ' err' : ''), v.message || 'Open your account summary, or pick the balance on the page.')
+    );
+    actions.append(button('Scan again', 'scan', { secondary: true }), button('Pick balance', 'pick'));
+    return;
+  }
+
+  if (!exchangeRateUSD) exchangeRateUSD = await getFXRate();
+  const usd = exchangeRateUSD ? v.jpy * exchangeRateUSD : null;
+  content.append(
+    el('div', 'jpy', `¥${v.jpy.toLocaleString('en-US')}`),
+    el('div', 'usd', usd == null ? '—' : fmtUSD(usd))
+  );
+
+  const { lastSync } = await chrome.storage.local.get('lastSync');
+  let sub;
+  if (v.state === 'synced') sub = el('div', 'sub ok', `✓ Updated ${v.accountName || 'Monarch'}`);
+  else if (v.state === 'error') sub = el('div', 'sub err', v.message);
+  else if (lastSync && lastSync.jpy === v.jpy) sub = el('div', 'sub ok', `Up to date · synced ${timeAgo(lastSync.at)}`);
+  else if (lastSync) sub = el('div', 'sub', `Last synced ${timeAgo(lastSync.at)}`);
+  if (sub) content.append(sub);
+
+  const label = { syncing: 'Syncing…', synced: 'Synced', error: 'Try again' }[v.state] || 'Sync now';
+  actions.append(button(label, 'sync', { disabled: v.state === 'syncing' || v.state === 'synced' }));
+}
+
+function onBannerClick(e) {
+  const act = e.target.closest('[data-act]')?.dataset.act;
+  if (act === 'close') {
+    bannerDismissed = true;
+    bannerRoot.host.remove();
+  } else if (act === 'pick') {
+    enableElementPicker();
+  } else if (act === 'scan') {
+    runScanOnce();
+  } else if (act === 'sync') {
+    syncFromBanner();
   }
 }
 
-// Interactive Element Picker
+const SETUP_ERRORS = new Set(['not_logged_in', 'token_expired', 'no_account_selected', 'native_error']);
+
+function syncFromBanner() {
+  const jpy = bannerView.jpy;
+  renderBanner({ state: 'syncing' });
+  chrome.runtime.sendMessage({ action: 'syncBalanceFromBanner', jpyBalance: jpy }, (res) => {
+    if (chrome.runtime.lastError || !res) {
+      renderBanner({ state: 'error', message: 'Extension not responding. Reload the page.' });
+    } else if (res.success) {
+      renderBanner({ state: 'synced', accountName: res.account_name });
+    } else {
+      const message = SETUP_ERRORS.has(res.error)
+        ? 'Finish setup in the extension popup (toolbar icon).'
+        : (res.message || 'Sync failed');
+      renderBanner({ state: 'error', message });
+    }
+  });
+}
+
+// ── Element picker ────────────────────────────────────────────────────────────
+
 function enableElementPicker() {
   if (pickerActive) return;
   pickerActive = true;
 
-  const overlay = document.createElement('div');
-  overlay.id = 'sbi-picker-overlay';
-  overlay.style.cssText = `
-    position: fixed;
-    top: 10px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 9999999;
-    background: #0369a1;
-    color: white;
-    padding: 10px 20px;
-    border-radius: 20px;
-    font-size: 14px;
-    font-weight: bold;
-    box-shadow: 0 4px 15px rgba(0,0,0,0.4);
-    pointer-events: none;
-  `;
-  overlay.innerText = '🎯 Click on your SBI Bank Balance number on screen!';
-  document.body.appendChild(overlay);
+  const hint = document.createElement('div');
+  hint.style.cssText = `
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 2147483647;
+    background: #4f46e5; color: #fff; padding: 8px 16px; border-radius: 999px;
+    font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    box-shadow: 0 6px 20px rgba(0,0,0,.3); pointer-events: none;`;
+  hint.textContent = 'Click your balance on the page · Esc to cancel';
+  document.body.appendChild(hint);
 
   let hoverEl = null;
+  let savedOutline = '';
+  const isOurs = (t) => t === hint || t.id === 'sbi-monarch-banner';
 
-  function onMouseOver(e) {
-    if (e.target.closest('#sbi-monarch-banner') || e.target.id === 'sbi-picker-overlay') return;
-    if (hoverEl) hoverEl.style.outline = '';
-    hoverEl = e.target;
-    hoverEl.style.outline = '2px solid #38bdf8';
+  function clearHover() {
+    if (hoverEl) hoverEl.style.outline = savedOutline;
+    hoverEl = null;
   }
-
-  function onClick(e) {
-    if (e.target.closest('#sbi-monarch-banner') || e.target.id === 'sbi-picker-overlay') return;
-    e.preventDefault();
-    e.stopPropagation();
-
-    if (hoverEl) hoverEl.style.outline = '';
+  function stop() {
+    clearHover();
     document.removeEventListener('mouseover', onMouseOver, true);
     document.removeEventListener('click', onClick, true);
-    overlay.remove();
+    document.removeEventListener('keydown', onKey, true);
+    hint.remove();
     pickerActive = false;
+  }
+  function onMouseOver(e) {
+    if (isOurs(e.target)) return;
+    clearHover();
+    hoverEl = e.target;
+    savedOutline = hoverEl.style.outline;
+    hoverEl.style.outline = '2px solid #6366f1';
+  }
+  function onKey(e) {
+    if (e.key === 'Escape') stop();
+  }
+  function onClick(e) {
+    if (isOurs(e.target)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const target = e.target;
+    stop();
 
-    const targetEl = e.target;
-    const clickedText = targetEl.innerText || targetEl.value;
-    const selector = getUniqueCssSelector(targetEl);
-    const num = extractYenNumber(clickedText);
-    
-    if (num) {
-      console.log('[SBI-Shinsei] Selected balance:', num);
-      lastDetectedBalance = num;
-      cachedCustomSelector = selector;
-      
-      chrome.storage.local.set({
-        lastParsedSBIBalance: num,
-        lastParsedTimestamp: Date.now(),
-        customSBISelector: selector
-      });
-
-      renderFloatingBanner(num);
-    } else {
-      alert('Could not parse a currency number from clicked element: ' + clickedText);
+    const num = extractYenNumber(target.innerText || target.value);
+    if (!num) {
+      renderBanner({ state: 'detecting', message: 'That element has no yen amount. Try clicking the number itself.' });
+      return;
     }
+    const selector = getUniqueCssSelector(target);
+    lastDetectedBalance = num;
+    cachedCustomSelector = selector;
+    chrome.storage.local.set({ lastParsedSBIBalance: num, lastParsedTimestamp: Date.now(), customSBISelector: selector });
+    renderBanner({ state: 'ready', jpy: num, message: null });
   }
 
   document.addEventListener('mouseover', onMouseOver, true);
   document.addEventListener('click', onClick, true);
+  document.addEventListener('keydown', onKey, true);
 }
 
 // Single-pass scanner
@@ -351,22 +395,18 @@ function runScanOnce() {
   const balance = parseSBIBalance();
   if (balance) {
     if (balance !== lastDetectedBalance) {
-      console.log('[SBI-Shinsei] Auto-detected balance:', balance);
       lastDetectedBalance = balance;
-      try {
-        chrome.storage.local.set({
-          lastParsedSBIBalance: balance,
-          lastParsedTimestamp: Date.now()
-        });
-      } catch (e) {}
+      chrome.storage.local.set({ lastParsedSBIBalance: balance, lastParsedTimestamp: Date.now() });
     }
-    renderFloatingBanner(balance);
-  } else if (IS_TOP_FRAME) {
-    renderFloatingBanner(null);
+    // Keep a "synced" banner as-is unless the balance changed.
+    if (!(bannerView.jpy === balance && ['synced', 'syncing'].includes(bannerView.state))) {
+      renderBanner({ state: 'ready', jpy: balance, message: null });
+    }
+  } else if (IS_TOP_FRAME && bannerView.state === 'detecting') {
+    renderBanner({ state: 'detecting' });
   }
 }
 
-// Watch for Navigation & Login Transitions (SPA pushState / popstate)
 // Content scripts run in an isolated JS world, so monkey-patching history.pushState
 // here would never see the page's own calls. The Navigation API's events, like all
 // DOM events, are visible from the isolated world.
@@ -403,6 +443,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (balance) sendResponse({ balance: balance });
   }
 });
+
+// If the balance lives in a subframe, that frame shows the banner. Drop the top
+// frame's "not found" card so there aren't two banners.
+if (IS_TOP_FRAME) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.lastParsedSBIBalance && !lastDetectedBalance && bannerView.state === 'detecting' && bannerRoot) {
+      bannerRoot.host.remove();
+    }
+  });
+}
 
 // Run initial setup and scan
 setupNavigationListeners();

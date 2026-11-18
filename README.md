@@ -14,7 +14,9 @@ A Chrome / Brave / Edge / Arc extension plus a small local Python service that c
 - 🏦 **Automatic balance detection** on SBI Shinsei PowerDirect, with an element picker for when the page layout changes.
 - 💱 **Live JPY→USD conversion** using spot rates.
 - 🔔 **On-page sync banner**: shows `¥ JPY ➔ $ USD` with a one-click **Sync Now** button.
+- 🔗 **One-click Monarch connection**: reuses the Monarch login already in your browser. There's no password to enter and no cookie to copy, and it picks up new sessions automatically.
 - 🔐 **Session stored in Apple Keychain**: never in a config file, browser storage, or process arguments.
+- 🕒 **Sync history at a glance**: the popup and banner show when you last synced and whether Monarch is up to date.
 - 📋 **Account picker**: lists your manual Monarch accounts so you choose where the balance goes.
 
 ---
@@ -31,7 +33,9 @@ A Chrome / Brave / Edge / Arc extension plus a small local Python service that c
                                                                    └──────────────────────────┘
 ```
 
-The extension never sees your Monarch credentials. It hands the JPY figure to a [native messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging) host, and that host is the only component that holds the session and talks to Monarch. Chrome only lets the extension ID you registered at install time launch the host.
+The extension never handles your Monarch password. When you're logged into Monarch in the browser, the service worker reads that session's cookies through Chrome's `cookies` API. It passes them, with the JPY figure, to a local [native messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging) host, which keeps a copy in Keychain and makes the Monarch API calls. Chrome only lets the extension ID you registered at install time launch the host.
+
+Why not log in with email and password? Monarch's login endpoint sits behind Cloudflare bot protection, which blocks scripted logins. Reusing the session you already have in the browser avoids that entirely.
 
 ---
 
@@ -42,7 +46,12 @@ The extension never sees your Monarch credentials. It hands the JPY figure to a 
   - Monarch's API (over TLS)
   - [open.er-api.com](https://open.er-api.com) for the exchange rate (this request carries no account data)
 - **Keychain storage**: the session is written through the [`keyring`](https://pypi.org/project/keyring/) library, which uses the macOS Security framework directly.
-- **Minimal permissions**: the extension requests only `storage` and `nativeMessaging`, plus host access to the bank's domains and the FX API.
+- **Minimal permissions**:
+  - `storage` and `nativeMessaging`
+  - `cookies`, used only to read your session for Monarch's two API hosts (`api.monarch.com`, `api.monarchmoney.com`)
+  - the FX API
+  - content-script access to SBI Shinsei's domains
+- **Session cookies stay local**: they're sent only to Monarch's API, and the host refuses any other endpoint.
 - **No silent writes to the wrong account**: if you haven't picked a target account and none is named like *SBI / Shinsei / Japan / Yen*, sync refuses to run.
 
 See [SECURITY.md](SECURITY.md) to report a vulnerability.
@@ -75,23 +84,29 @@ The installer generates a launcher pinned to the Python interpreter that has the
 ### 1. Create a manual account in Monarch
 **Accounts ➔ Add Account ➔ Manual Account**, then name it e.g. `SBI Shinsei Bank` (type: Cash / Checking).
 
-### 2. Connect your Monarch session (one time)
-Monarch's login endpoint sits behind Cloudflare bot protection, so the reliable method is to reuse your browser session:
+### 2. Connect Monarch (one time)
+1. Make sure you're logged into [Monarch](https://app.monarch.com) in the same browser.
+2. Open the extension popup and click **Connect Monarch**.
 
-1. Open [app.monarch.com](https://app.monarch.com) while logged in.
-2. Open DevTools (`⌥⌘I`), go to **Network**, filter for `graphql`, and click any request.
-3. Under **Request Headers**, copy the full `Cookie:` value (it must include `session_id=…` and `csrftoken=…`).
-4. Paste it into the extension popup and click **Save Monarch Session**, or run this and paste at the hidden prompt:
+If you aren't logged in, the extension opens Monarch's login page and connects automatically once you sign in. If your session later expires, logging back into Monarch is enough to reconnect.
+
+<details>
+<summary>Manual fallback: paste a session cookie</summary>
+
+1. On app.monarch.com, open DevTools (`⌥⌘I`), go to **Network**, filter for `graphql`, and click any request.
+2. Under **Request Headers**, copy the full `Cookie:` value.
+3. In the popup, choose **Paste a session cookie instead**, or run this and paste at the hidden prompt:
    ```bash
    python3 native-host/sbi_monarch_host.py --session
    ```
 
-> ⚠️ This cookie grants full access to your Monarch account. Treat it like a password. Don't paste it into issues or chats.
+> ⚠️ This cookie grants full access to your Monarch account. Treat it like a password, and don't paste it into issues or chats.
+</details>
 
-Other host commands: `--status`, `--logout`, `--login` (email/password; often blocked by Cloudflare).
+Other host commands: `--status`, `--logout`, `--login` (email/password; usually blocked by Cloudflare).
 
 ### 3. Sync
-- **On-page banner:** log into [SBI Shinsei PowerDirect](https://bk.web.sbishinseibank.co.jp/) and click **Sync Now**. If the detected number is wrong, click **🎯 Pick Element** and select your balance. The extension remembers your choice.
+- **On-page banner:** log into [SBI Shinsei PowerDirect](https://bk.web.sbishinseibank.co.jp/) and click **Sync now**. If the detected number is wrong, click **🎯 Pick Element** and select your balance. The extension remembers your choice.
 - **Popup:** check the balance and target account, then click **⚡ Sync Balance to Monarch**.
 - **CLI (no browser):**
   ```bash
@@ -121,9 +136,10 @@ For debugging, open the popup's **Debug Log**, or inspect the service worker fro
 sbi-monarch-link/
 ├── browser-extension/
 │   ├── manifest.json          # Manifest V3 config
-│   ├── background.js          # Service worker: native messaging bridge, FX fetch
-│   ├── content.js             # SBI balance detection + floating banner
-│   ├── popup.html / popup.js  # Popup UI
+│   ├── background.js          # Service worker: Monarch session capture, native messaging, FX
+│   ├── content.js             # SBI balance detection + Shadow-DOM sync banner
+│   ├── popup.html / popup.js  # Popup: setup checklist, conversion, account picker
+│   └── icons/                 # icon.svg source + rendered PNGs
 ├── native-host/
 │   ├── sbi_monarch_host.py    # Native host: Keychain session + Monarch GraphQL
 │   └── install_native_host.sh # Generates launcher + host manifest, registers with browsers

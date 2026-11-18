@@ -1,344 +1,311 @@
-// popup.js - Extension UI logic (Native Messaging architecture)
+// popup.js — extension popup: setup checklist, balance conversion, account picker, sync
 
-let currentRate = 0;
-let targetAccountId = null;
-let fetchedAccounts = [];
+const $ = (id) => document.getElementById(id);
+const ACCOUNT_KEYWORDS = ['sbi', 'shinsei', 'japan', 'yen'];
 
-function logDebug(msg) {
-  console.log('[SBI-Monarch]', msg);
-  const debugBox = document.getElementById('debugBox');
-  if (debugBox) {
-    const time = new Date().toLocaleTimeString();
-    debugBox.innerText += `[${time}] ${msg}\n`;
-    debugBox.scrollTop = debugBox.scrollHeight;
-  }
-}
+const state = {
+  rate: null,
+  jpy: 0,
+  hostInstalled: false,
+  connected: false,
+  accounts: [],
+  accountId: null,
+  busy: false,
+};
 
-function setStatus(msg, type) {
-  const statusEl = document.getElementById('status');
-  statusEl.innerText = msg;
-  statusEl.style.color = type === 'error' ? '#f87171' : type === 'success' ? '#4ade80' : '#38bdf8';
-}
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-function updateConnectionIndicator(state) {
-  const ind = document.getElementById('loginIndicator');
-  if (state === 'connected') {
-    ind.innerText = '● Connected';
-    ind.style.background = '#16a34a';
-    ind.style.color = '#fff';
-  } else if (state === 'error') {
-    ind.innerText = '● Not Setup';
-    ind.style.background = '#7f1d1d';
-    ind.style.color = '#fca5a5';
-  } else {
-    ind.innerText = '○ Checking...';
-    ind.style.background = '#334155';
-    ind.style.color = '#94a3b8';
-  }
-}
-
-// ── Exchange Rate ─────────────────────────────────────────────────────────────
-
-async function fetchExchangeRate() {
-  const rateBadge = document.getElementById('rateBadge');
-  logDebug(`Extension v${chrome.runtime.getManifest().version} active.`);
-  try {
-    const res = await fetch('https://open.er-api.com/v6/latest/JPY');
-    const data = await res.json();
-    currentRate = data.rates.USD;
-    rateBadge.innerText = `1 JPY = ${currentRate.toFixed(6)} USD`;
-    recalculate();
-  } catch (err) {
-    rateBadge.innerText = 'Failed to fetch exchange rate';
-    logDebug('FX rate fetch failed: ' + err.message);
-  }
-}
-
-function recalculate() {
-  const jpyVal = parseFloat(document.getElementById('jpyInput').value.replace(/,/g, '')) || 0;
-  const usdVal = (jpyVal * currentRate).toFixed(2);
-  document.getElementById('usdResult').innerText = `$${Number(usdVal).toLocaleString()}`;
-}
-
-// ── Account Selector ──────────────────────────────────────────────────────────
-
-function renderAccountSelector(accounts) {
-  const selectSection = document.getElementById('accountSelectSection');
-  const accountSelect = document.getElementById('accountSelect');
-  accountSelect.innerHTML = '';
-
-  accounts.forEach(acc => {
-    const opt = document.createElement('option');
-    opt.value = acc.id;
-    opt.innerText = `${acc.displayName} ($${(acc.currentBalance || 0).toLocaleString()})`;
-    if (acc.id === targetAccountId) opt.selected = true;
-    accountSelect.appendChild(opt);
-  });
-
-  selectSection.style.display = 'block';
-
-  accountSelect.onchange = (e) => {
-    targetAccountId = e.target.value;
-    const selected = accounts.find(a => a.id === targetAccountId);
-    if (selected) {
-      document.getElementById('linkedAccountName').innerText = `${selected.displayName} ($${(selected.currentBalance || 0).toLocaleString()})`;
-      chrome.storage.local.set({ monarchAccountId: targetAccountId });
-      logDebug(`Account changed to: "${selected.displayName}" (${targetAccountId})`);
-    }
-  };
-
-  // Set selected account display
-  if (targetAccountId) {
-    const selected = accounts.find(a => a.id === targetAccountId) || accounts[0];
-    if (selected) {
-      document.getElementById('linkedAccountName').innerText = `${selected.displayName} ($${(selected.currentBalance || 0).toLocaleString()})`;
-    }
-  }
-}
-
-// ── Native Host Connection Check ──────────────────────────────────────────────
-
-async function checkNativeHost() {
-  setStatus('Checking native host connection...', 'info');
-  logDebug('Pinging native host...');
-
+function send(action, payload = {}) {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ action: 'pingNativeHost' }, (res) => {
-      if (res && res.success) {
-        logDebug(`✓ Native host running! Session saved: ${res.has_session}`);
-        if (res.has_session) {
-          document.getElementById('loginSection').style.display = 'none';
-          updateConnectionIndicator('connected');
-          setStatus('✓ Native host connected! Load accounts below.', 'success');
-          loadMonarchAccounts();
-        } else {
-          document.getElementById('loginSection').style.display = 'block';
-          document.getElementById('setupNeeded').style.display = 'block';
-          setStatus('Native host found but not logged in. Enter Monarch credentials below.', 'info');
-          updateConnectionIndicator('error');
-        }
-        resolve(true);
-      } else {
-        const msg = res?.message || 'Native host not installed.';
-        logDebug('Native host error: ' + msg);
-        document.getElementById('loginSection').style.display = 'block';
-        document.getElementById('nativeHostError').style.display = 'block';
-        document.getElementById('nativeHostError').innerText = msg;
-        setStatus('⚠ Native host not installed. See setup steps below.', 'error');
-        updateConnectionIndicator('error');
-        resolve(false);
-      }
+    chrome.runtime.sendMessage({ action, ...payload }, (res) => {
+      if (chrome.runtime.lastError) resolve({ success: false, message: chrome.runtime.lastError.message });
+      else resolve(res || { success: false, message: 'No response from extension.' });
     });
   });
 }
 
-// Session missing or expired: show the session form again
-function showLoginNeeded(msg) {
-  document.getElementById('loginSection').style.display = 'block';
-  updateConnectionIndicator('error');
-  setStatus(msg || 'Not logged into Monarch. Paste a session cookie below.', 'error');
+const fmtJPY = (n) => Math.round(n).toLocaleString('en-US');
+const fmtUSD = (n) => Number(n).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+
+function timeAgo(ts) {
+  const mins = Math.round((Date.now() - ts) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
 }
 
-// Don't leave secrets sitting in the popup's input fields once they've been used
-function clearSecretInputs() {
-  for (const id of ['monarchPassword', 'monarchMfa', 'monarchTokenInput']) {
-    document.getElementById(id).value = '';
-  }
+function log(msg) {
+  console.log('[SBI-Monarch]', msg);
+  const box = $('debugBox');
+  box.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+  box.scrollTop = box.scrollHeight;
 }
 
-// ── Load Monarch Accounts ─────────────────────────────────────────────────────
-
-async function loadMonarchAccounts() {
-  logDebug('Loading Monarch accounts from native host...');
-  setStatus('Loading accounts...', 'info');
-
-  chrome.runtime.sendMessage({ action: 'getMonarchAccounts' }, (res) => {
-    if (!res || !res.success) {
-      const msg = res?.message || 'Failed to load accounts.';
-      logDebug('Account load error: ' + msg);
-      if (res?.error === 'not_logged_in' || res?.error === 'token_expired') {
-        showLoginNeeded(msg);
-      } else {
-        setStatus('Error: ' + msg, 'error');
-      }
-      return;
-    }
-
-    fetchedAccounts = res.accounts || [];
-    logDebug(`Loaded ${fetchedAccounts.length} manual accounts.`);
-
-    if (fetchedAccounts.length === 0) {
-      setStatus('No manual accounts in Monarch. Create one first!', 'error');
-      return;
-    }
-
-    // Auto-select saved or best match. Only persist a keyword match automatically; a
-    // plain "first account" default is shown but not saved until the user confirms it
-    // (by syncing or choosing it), so the on-page banner never writes to a guessed account.
-    const savedId = targetAccountId;
-    const saved = fetchedAccounts.find(a => a.id === savedId);
-    const matched = fetchedAccounts.find(a => ['sbi','shinsei','japan','yen'].some(kw => a.displayName.toLowerCase().includes(kw)));
-    const best = saved || matched || fetchedAccounts[0];
-
-    targetAccountId = best.id;
-    if (saved || matched) chrome.storage.local.set({ monarchAccountId: targetAccountId });
-    renderAccountSelector(fetchedAccounts);
-    setStatus(`✓ Ready! ${fetchedAccounts.length} account(s) loaded.`, 'success');
-  });
+function setStatus(msg, type = '') {
+  $('status').textContent = msg || '';
+  $('status').className = type;
 }
 
-// ── Login to Monarch (via native host) ───────────────────────────────────────
+// ── Rendering ─────────────────────────────────────────────────────────────────
 
-async function loginToMonarch() {
-  const email = document.getElementById('monarchEmail').value.trim();
-  const password = document.getElementById('monarchPassword').value;
-  const mfa = document.getElementById('monarchMfa').value.trim() || null;
-
-  if (!email || !password) {
-    setStatus('Please enter your Monarch email and password.', 'error');
-    return;
+function render() {
+  const pill = $('connectionPill');
+  if (!state.hostInstalled) {
+    pill.textContent = 'Setup needed';
+    pill.className = 'pill warn';
+  } else if (!state.connected) {
+    pill.textContent = 'Not connected';
+    pill.className = 'pill warn';
+  } else {
+    pill.textContent = 'Connected';
+    pill.className = 'pill ok';
   }
 
-  setStatus('Logging into Monarch...', 'info');
-  logDebug('Attempting Monarch login...');  // never log the email: users paste this log into bug reports
+  $('setupCard').hidden = state.hostInstalled && state.connected;
+  setStep('stepHost', state.hostInstalled ? 'done' : 'todo', '1');
+  setStep('stepMonarch', state.connected ? 'done' : state.hostInstalled ? 'todo' : '', '2');
+  $('connectBtn').disabled = !state.hostInstalled;
+  $('saveTokenBtn').disabled = !state.hostInstalled;
+  $('accountCard').hidden = !state.connected;
 
-  chrome.runtime.sendMessage({ action: 'monarchLogin', email, password, mfa_secret: mfa }, (res) => {
-    if (!res) {
-      setStatus('No response from native host. Is it installed?', 'error');
-      return;
-    }
-    if (res.success) {
-      clearSecretInputs();
-      logDebug('✓ Logged in successfully! Session saved.');
-      setStatus('✓ Logged in! Loading your accounts...', 'success');
-      document.getElementById('loginSection').style.display = 'none';
-      updateConnectionIndicator('connected');
-      loadMonarchAccounts();
-    } else if (res.error === 'mfa_required') {
-      setStatus('MFA required — enter your TOTP secret key or current 6-digit code above.', 'error');
-      logDebug('MFA required. Enter your TOTP secret key or the current 6-digit code.');
-    } else {
-      setStatus('Login failed: ' + (res.message || res.error), 'error');
-      logDebug('Login error: ' + (res.message || res.error));
-    }
-  });
+  const usd = state.rate ? state.jpy * state.rate : null;
+  $('usdResult').textContent = usd == null ? '—' : fmtUSD(usd);
+
+  const ready = state.hostInstalled && state.connected && state.accountId && state.jpy > 0;
+  $('syncBtn').disabled = !ready || state.busy;
 }
 
-// ── Sync Balance ──────────────────────────────────────────────────────────────
-
-async function syncBalance() {
-  const jpyVal = parseFloat(document.getElementById('jpyInput').value.replace(/,/g, '')) || 0;
-
-  if (!jpyVal) {
-    setStatus('No JPY balance detected. Open SBI Shinsei PowerDirect first.', 'error');
-    return;
-  }
-
-  if (!targetAccountId) {
-    setStatus('No Monarch account selected.', 'error');
-    return;
-  }
-
-  setStatus('Syncing balance to Monarch...', 'info');
-  logDebug(`Syncing ¥${jpyVal.toLocaleString()} to account ${targetAccountId}...`);
-
-  chrome.runtime.sendMessage({
-    action: 'syncToMonarch',
-    jpy_balance: jpyVal,
-    account_id: targetAccountId
-  }, (res) => {
-    if (!res || !res.success) {
-      const msg = res?.message || res?.error || 'Unknown error';
-      logDebug('Sync error: ' + msg);
-      if (res?.error === 'not_logged_in' || res?.error === 'token_expired') {
-        showLoginNeeded(msg);
-      } else {
-        setStatus('Sync failed: ' + msg, 'error');
-      }
-    } else {
-      chrome.storage.local.set({ monarchAccountId: targetAccountId });
-      logDebug(`✓ ${res.message}`);
-      setStatus(`✓ ${res.message}`, 'success');
-      // Refresh accounts list to show updated balance
-      setTimeout(loadMonarchAccounts, 500);
-    }
-  });
+function setStep(id, status, number) {
+  const el = $(id);
+  el.className = `step ${status}`;
+  el.querySelector('.step-mark').textContent = status === 'done' ? '✓' : number;
 }
 
-// ── SBI Balance Detection ─────────────────────────────────────────────────────
+function setSourceChip(source, at) {
+  const chip = $('sourceChip');
+  chip.className = 'chip' + (source === 'live' ? ' live' : '');
+  chip.textContent = {
+    live: 'Live from SBI',
+    cached: `Saved ${at ? timeAgo(at) : ''}`.trim(),
+    manual: 'Edited',
+  }[source] || 'No balance yet';
+}
 
-function loadDetectedBalance() {
-  const detectionSourceEl = document.getElementById('detectionSource');
+function setJpy(value, source, at) {
+  state.jpy = value || 0;
+  $('jpyInput').value = state.jpy ? fmtJPY(state.jpy) : '';
+  setSourceChip(state.jpy ? source : null, at);
+  render();
+}
 
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    let handled = false;
-    if (tabs[0] && tabs[0].id) {
-      chrome.tabs.sendMessage(tabs[0].id, { action: 'getSBIBalance' }, (response) => {
-        if (!chrome.runtime.lastError && response && response.balance) {
-          handled = true;
-          document.getElementById('jpyInput').value = response.balance;
-          detectionSourceEl.innerText = `✓ Live from SBI page: ¥${Number(response.balance).toLocaleString()}`;
-          detectionSourceEl.style.color = '#4ade80';
-          recalculate();
-          chrome.storage.local.set({ lastParsedSBIBalance: response.balance, lastParsedTimestamp: Date.now() });
-        }
+function renderAccounts() {
+  const select = $('accountSelect');
+  select.replaceChildren();
+
+  const saved = state.accounts.find(a => a.id === state.accountId);
+  const matched = state.accounts.find(a => ACCOUNT_KEYWORDS.some(kw => a.displayName.toLowerCase().includes(kw)));
+
+  if (!saved && !matched && state.accounts.length) {
+    // Never guess silently: make the user pick which account receives the balance.
+    const placeholder = new Option('Choose an account…', '', true, true);
+    placeholder.disabled = true;
+    select.append(placeholder);
+    state.accountId = null;
+  } else {
+    state.accountId = (saved || matched || {}).id || null;
+    if (state.accountId) chrome.storage.local.set({ monarchAccountId: state.accountId });
+  }
+
+  for (const acc of state.accounts) {
+    const opt = new Option(`${acc.displayName} · ${fmtUSD(acc.currentBalance || 0)}`, acc.id);
+    opt.selected = acc.id === state.accountId;
+    select.append(opt);
+  }
+  render();
+}
+
+function renderLastSync(lastSync) {
+  $('lastSyncLine').textContent = lastSync
+    ? `Last synced ${fmtUSD(lastSync.usd)} to ${lastSync.accountName} · ${timeAgo(lastSync.at)}`
+    : 'Not synced yet.';
+}
+
+// ── Data loading ──────────────────────────────────────────────────────────────
+
+async function loadFx() {
+  const res = await send('getFxRate');
+  if (res.success) {
+    state.rate = res.rate;
+    const at = new Date(res.fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    $('rateLine').textContent = `1 JPY = ${res.rate.toFixed(6)} USD · ${at}`;
+  } else {
+    $('rateLine').textContent = 'Exchange rate unavailable';
+    log('FX error: ' + res.message);
+  }
+  render();
+}
+
+function askActiveTabForBalance() {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (!tabs[0] || !tabs[0].id) return resolve(null);
+      chrome.tabs.sendMessage(tabs[0].id, { action: 'getSBIBalance' }, (res) => {
+        resolve(!chrome.runtime.lastError && res && res.balance ? res.balance : null);
       });
-    }
-
-    setTimeout(() => {
-      if (!handled) {
-        chrome.storage.local.get(['lastParsedSBIBalance', 'lastParsedTimestamp'], (items) => {
-          if (items.lastParsedSBIBalance) {
-            document.getElementById('jpyInput').value = items.lastParsedSBIBalance;
-            const minsAgo = items.lastParsedTimestamp ? Math.round((Date.now() - items.lastParsedTimestamp) / 60000) : 0;
-            const timeStr = minsAgo < 1 ? 'just now' : `${minsAgo}m ago`;
-            detectionSourceEl.innerText = `✓ Cached balance (${timeStr}): ¥${Number(items.lastParsedSBIBalance).toLocaleString()}`;
-            detectionSourceEl.style.color = '#4ade80';
-            recalculate();
-          }
-        });
-      }
-    }, 300);
+    });
   });
 }
 
-async function saveMonarchToken() {
-  const token = document.getElementById('monarchTokenInput').value.trim();
-  if (!token) {
-    setStatus('Please paste a session token.', 'error');
+async function loadBalance() {
+  const live = await askActiveTabForBalance();
+  if (live) {
+    setJpy(live, 'live');
+    chrome.storage.local.set({ lastParsedSBIBalance: live, lastParsedTimestamp: Date.now() });
     return;
   }
-  setStatus('Saving token to Apple Keychain...', 'info');
-  chrome.runtime.sendMessage({ action: 'saveMonarchToken', token }, (res) => {
-    if (res && res.success) {
-      clearSecretInputs();
-      logDebug('✓ Token saved to Keychain.');
-      setStatus('✓ Token saved! Loading accounts...', 'success');
-      document.getElementById('loginSection').style.display = 'none';
-      updateConnectionIndicator('connected');
-      loadMonarchAccounts();
-    } else {
-      setStatus('Failed to save token: ' + (res?.message || 'Unknown error'), 'error');
-    }
-  });
+  const { lastParsedSBIBalance, lastParsedTimestamp } = await chrome.storage.local.get(['lastParsedSBIBalance', 'lastParsedTimestamp']);
+  if (lastParsedSBIBalance) setJpy(lastParsedSBIBalance, 'cached', lastParsedTimestamp);
 }
 
-// ── Event Listeners ───────────────────────────────────────────────────────────
+async function loadAccounts({ keepStatus = false } = {}) {
+  log('Loading Monarch accounts…');
+  const res = await send('getMonarchAccounts');
+  if (!res.success) {
+    state.connected = false;
+    render();
+    if (res.error === 'token_expired') setStatus('Your Monarch session expired. Log into Monarch, then Connect.', 'error');
+    else if (res.error === 'not_logged_in') setStatus('Connect Monarch to continue.');
+    else setStatus(res.message || 'Could not load Monarch accounts.', 'error');
+    log('Account load failed: ' + (res.error || res.message));
+    return;
+  }
+  state.connected = true;
+  state.accounts = res.accounts || [];
+  log(`Loaded ${state.accounts.length} manual account(s).`);
+  renderAccounts();
+  if (!state.accounts.length) {
+    setStatus('No manual accounts in Monarch yet. Add one (Accounts → Add account → Manual), then press ↻.', 'error');
+  } else if (!state.accountId) {
+    setStatus('Choose which Monarch account to update.');
+  } else if (!keepStatus) {
+    setStatus('');
+  }
+}
 
-document.getElementById('loginMonarchBtn').addEventListener('click', loginToMonarch);
-document.getElementById('saveTokenBtn').addEventListener('click', saveMonarchToken);
-document.getElementById('jpyInput').addEventListener('input', recalculate);
-document.getElementById('syncBtn').addEventListener('click', syncBalance);
-document.getElementById('refreshAccountsBtn').addEventListener('click', loadMonarchAccounts);
+// ── Actions ───────────────────────────────────────────────────────────────────
+
+async function connectMonarch() {
+  setStatus('Connecting…');
+  const res = await send('connectMonarch');
+  if (res.success) {
+    state.connected = true;
+    state.accounts = res.accounts || [];
+    renderAccounts();
+    setStatus('Connected to Monarch.', 'success');
+    log('Connected using the browser session.');
+  } else if (res.error === 'needs_browser_login') {
+    setStatus(res.message);
+  } else {
+    setStatus(res.message || 'Could not connect.', 'error');
+    log('Connect failed: ' + (res.error || res.message));
+  }
+}
+
+async function saveManualSession() {
+  const input = $('monarchTokenInput');
+  const token = input.value.trim();
+  if (!token) return setStatus('Paste your Monarch Cookie header first.', 'error');
+  const res = await send('saveMonarchToken', { token });
+  input.value = '';
+  if (!res.success) return setStatus(res.message || 'Could not save session.', 'error');
+  log('Manual session saved to Keychain.');
+  await loadAccounts();
+}
+
+async function sync() {
+  state.busy = true;
+  const btn = $('syncBtn');
+  btn.textContent = 'Syncing…';
+  render();
+  log(`Syncing ¥${fmtJPY(state.jpy)} → account ${state.accountId}`);
+
+  const res = await send('syncToMonarch', { jpy_balance: state.jpy, account_id: state.accountId });
+
+  state.busy = false;
+  btn.textContent = 'Sync to Monarch';
+  if (res.success) {
+    setStatus(`Updated ${res.account_name} to ${fmtUSD(res.usd_balance)}`, 'success');
+    log(res.message);
+    loadAccounts({ keepStatus: true });
+  } else if (res.error === 'token_expired' || res.error === 'not_logged_in') {
+    state.connected = false;
+    setStatus('Your Monarch session expired. Log into Monarch, then Connect.', 'error');
+  } else {
+    setStatus('Sync failed: ' + (res.message || res.error), 'error');
+    log('Sync error: ' + (res.message || res.error));
+  }
+  render();
+}
+
+// ── Wiring ────────────────────────────────────────────────────────────────────
+
+$('jpyInput').addEventListener('input', (e) => {
+  state.jpy = Number(e.target.value.replace(/[^\d.]/g, '')) || 0;
+  setSourceChip(state.jpy ? 'manual' : null);
+  render();
+});
+$('jpyInput').addEventListener('blur', () => {
+  $('jpyInput').value = state.jpy ? fmtJPY(state.jpy) : '';
+});
+$('accountSelect').addEventListener('change', (e) => {
+  state.accountId = e.target.value;
+  chrome.storage.local.set({ monarchAccountId: state.accountId });
+  setStatus('');
+  render();
+});
+$('syncBtn').addEventListener('click', sync);
+$('refreshAccountsBtn').addEventListener('click', loadAccounts);
+$('connectBtn').addEventListener('click', connectMonarch);
+$('saveTokenBtn').addEventListener('click', saveManualSession);
+$('copyCmdBtn').addEventListener('click', async () => {
+  await navigator.clipboard.writeText($('installCmd').textContent);
+  $('copyCmdBtn').textContent = 'Copied';
+  setTimeout(() => { $('copyCmdBtn').textContent = 'Copy'; }, 1500);
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (changes.monarchConnectedAt && !state.connected && state.hostInstalled) loadAccounts();
+  if (changes.lastSync) renderLastSync(changes.lastSync.newValue);
+});
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 
-chrome.storage.local.get(['monarchAccountId'], (items) => {
-  if (items.monarchAccountId) {
-    targetAccountId = items.monarchAccountId;
-  }
-  checkNativeHost();
-});
+async function init() {
+  log(`Extension v${chrome.runtime.getManifest().version}`);
+  $('installCmd').textContent = `bash native-host/install_native_host.sh ${chrome.runtime.id}`;
 
-fetchExchangeRate();
-loadDetectedBalance();
+  const { monarchAccountId, lastSync } = await chrome.storage.local.get(['monarchAccountId', 'lastSync']);
+  state.accountId = monarchAccountId || null;
+  renderLastSync(lastSync);
+
+  loadFx();
+  loadBalance();
+
+  const status = await send('getStatus');
+  state.hostInstalled = !!status.hostInstalled;
+  log(state.hostInstalled ? `Native host v${status.hostVersion || '?'} OK` : `Native host missing: ${status.hostMessage || status.message}`);
+
+  if (!state.hostInstalled) {
+    setStatus('Finish setup to start syncing.');
+  } else if (status.browserLoggedIn || status.hasStoredSession) {
+    await loadAccounts();
+  } else {
+    setStatus('Connect Monarch to continue.');
+  }
+  render();
+}
+
+init();
