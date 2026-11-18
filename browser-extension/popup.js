@@ -132,6 +132,20 @@ async function checkNativeHost() {
   });
 }
 
+// Session missing or expired: show the session form again
+function showLoginNeeded(msg) {
+  document.getElementById('loginSection').style.display = 'block';
+  updateConnectionIndicator('error');
+  setStatus(msg || 'Not logged into Monarch. Paste a session cookie below.', 'error');
+}
+
+// Don't leave secrets sitting in the popup's input fields once they've been used
+function clearSecretInputs() {
+  for (const id of ['monarchPassword', 'monarchMfa', 'monarchTokenInput']) {
+    document.getElementById(id).value = '';
+  }
+}
+
 // ── Load Monarch Accounts ─────────────────────────────────────────────────────
 
 async function loadMonarchAccounts() {
@@ -143,8 +157,7 @@ async function loadMonarchAccounts() {
       const msg = res?.message || 'Failed to load accounts.';
       logDebug('Account load error: ' + msg);
       if (res?.error === 'not_logged_in' || res?.error === 'token_expired') {
-        document.getElementById('loginSection').style.display = 'block';
-        setStatus('Not logged into Monarch. Enter credentials below.', 'error');
+        showLoginNeeded(msg);
       } else {
         setStatus('Error: ' + msg, 'error');
       }
@@ -187,7 +200,7 @@ async function loginToMonarch() {
   }
 
   setStatus('Logging into Monarch...', 'info');
-  logDebug(`Attempting Monarch login for ${email}...`);
+  logDebug('Attempting Monarch login...');  // never log the email: users paste this log into bug reports
 
   chrome.runtime.sendMessage({ action: 'monarchLogin', email, password, mfa_secret: mfa }, (res) => {
     if (!res) {
@@ -195,6 +208,7 @@ async function loginToMonarch() {
       return;
     }
     if (res.success) {
+      clearSecretInputs();
       logDebug('✓ Logged in successfully! Session saved.');
       setStatus('✓ Logged in! Loading your accounts...', 'success');
       document.getElementById('loginSection').style.display = 'none';
@@ -202,7 +216,7 @@ async function loginToMonarch() {
       loadMonarchAccounts();
     } else if (res.error === 'mfa_required') {
       setStatus('MFA required — enter your TOTP secret key or current 6-digit code above.', 'error');
-      logDebug('MFA required. Enter your TOTP secret key (not the 6-digit code).');
+      logDebug('MFA required. Enter your TOTP secret key or the current 6-digit code.');
     } else {
       setStatus('Login failed: ' + (res.message || res.error), 'error');
       logDebug('Login error: ' + (res.message || res.error));
@@ -236,7 +250,11 @@ async function syncBalance() {
     if (!res || !res.success) {
       const msg = res?.message || res?.error || 'Unknown error';
       logDebug('Sync error: ' + msg);
-      setStatus('Sync failed: ' + msg, 'error');
+      if (res?.error === 'not_logged_in' || res?.error === 'token_expired') {
+        showLoginNeeded(msg);
+      } else {
+        setStatus('Sync failed: ' + msg, 'error');
+      }
     } else {
       chrome.storage.local.set({ monarchAccountId: targetAccountId });
       logDebug(`✓ ${res.message}`);
@@ -293,6 +311,7 @@ async function saveMonarchToken() {
   setStatus('Saving token to Apple Keychain...', 'info');
   chrome.runtime.sendMessage({ action: 'saveMonarchToken', token }, (res) => {
     if (res && res.success) {
+      clearSecretInputs();
       logDebug('✓ Token saved to Keychain.');
       setStatus('✓ Token saved! Loading accounts...', 'success');
       document.getElementById('loginSection').style.display = 'none';
