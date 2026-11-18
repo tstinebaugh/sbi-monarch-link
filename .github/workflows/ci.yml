@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt pytest ruff
+      - run: ruff check .
+      - run: pytest -q
+
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Syntax-check extension scripts
+        run: for f in browser-extension/*.js; do node --check "$f"; done
+      - name: Validate manifest JSON
+        run: python3 -m json.tool browser-extension/manifest.json > /dev/null
+      - name: Lint installer
+        run: shellcheck native-host/install_native_host.sh

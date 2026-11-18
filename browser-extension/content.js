@@ -12,15 +12,19 @@ chrome.storage.local.get(['customSBISelector'], (items) => {
   }
 });
 
-// Fetch exchange rate for floating banner
-async function getFXRate() {
-  try {
-    const res = await fetch('https://open.er-api.com/v6/latest/JPY');
-    const data = await res.json();
-    return data.rates.USD;
-  } catch (e) {
-    return null;
-  }
+const IS_TOP_FRAME = window === window.top;
+
+// Fetch exchange rate via the service worker (avoids the bank page's CSP / CORS rules)
+function getFXRate() {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ action: 'getFxRate' }, (res) => {
+        resolve(!chrome.runtime.lastError && res && res.success ? res.rate : null);
+      });
+    } catch (e) {
+      resolve(null);
+    }
+  });
 }
 
 // Generate a unique CSS selector path for any DOM element
@@ -49,19 +53,22 @@ function getUniqueCssSelector(el) {
 }
 
 // DOM scanner with priority Angular & SBI topMain selectors
+// Detection runs in tiers from most to least specific and stops at the first tier
+// that finds a value. Taking the max across *all* tiers would let an unrelated large
+// number (a transfer limit, an account number) win over the balance the user picked.
 function parseSBIBalance() {
-  const candidates = [];
-
-  // 1. Check pre-loaded custom selector from user click
+  // 1. Element the user picked with the element picker always wins
   if (cachedCustomSelector) {
     try {
       const el = document.querySelector(cachedCustomSelector);
       if (el) {
         const num = extractYenNumber(el.innerText || el.value);
-        if (num && num > 0) candidates.push(num);
+        if (num && num > 0) return num;
       }
     } catch (e) {}
   }
+
+  let candidates = [];
 
   // 2. Specific SBI Shinsei Angular & ID / Class selectors
   const prioritySelectors = [
@@ -90,6 +97,7 @@ function parseSBIBalance() {
       }
     }
   }
+  if (candidates.length) return Math.max(...candidates);
 
   // 3. Search key Japanese & English balance labels on targeted elements
   const keywords = ['Total', '総資産', '評価額', '資産合計', '円預金', '普通預金', '預金合計', '残高合計', 'Balance'];
@@ -102,9 +110,11 @@ function parseSBIBalance() {
       if (text.includes(kw)) {
         const num = extractYenNumber(text);
         if (num && num > 0) candidates.push(num);
+        break;
       }
     }
   }
+  if (candidates.length) return Math.max(...candidates);
 
   // 4. Global Currency Regex Fallback
   const bodyText = document.body.innerText || '';
@@ -125,12 +135,7 @@ function parseSBIBalance() {
     }
   }
 
-  if (candidates.length > 0) {
-    candidates.sort((a, b) => b - a);
-    return candidates[0];
-  }
-
-  return null;
+  return candidates.length ? Math.max(...candidates) : null;
 }
 
 function extractYenNumber(str) {
@@ -213,15 +218,16 @@ async function renderFloatingBanner(jpyBalance) {
 
       chrome.runtime.sendMessage({
         action: 'syncBalanceFromBanner',
-        jpyBalance: jpyBalance,
-        usdBalance: parseFloat(usdAmount)
+        jpyBalance: jpyBalance
       }, (response) => {
         if (response && response.success) {
           btn.innerText = '✓ Synced!';
           btn.style.background = '#16a34a';
         } else {
-          btn.innerText = 'Setup Monarch Account in Extension';
+          btn.innerText = 'Sync failed – open extension';
+          btn.title = (response && response.message) || 'No response from extension';
           btn.style.background = '#dc2626';
+          btn.disabled = false;
         }
       });
     };
@@ -355,32 +361,35 @@ function runScanOnce() {
       } catch (e) {}
     }
     renderFloatingBanner(balance);
-  } else {
+  } else if (IS_TOP_FRAME) {
     renderFloatingBanner(null);
   }
 }
 
 // Watch for Navigation & Login Transitions (SPA pushState / popstate)
+// Content scripts run in an isolated JS world, so monkey-patching history.pushState
+// here would never see the page's own calls. The Navigation API's events, like all
+// DOM events, are visible from the isolated world.
 function setupNavigationListeners() {
-  const origPushState = history.pushState;
-  const origReplaceState = history.replaceState;
-
-  history.pushState = function(...args) {
-    origPushState.apply(this, args);
-    onUrlNavigated();
-  };
-
-  history.replaceState = function(...args) {
-    origReplaceState.apply(this, args);
-    onUrlNavigated();
-  };
-
+  if (window.navigation) {
+    window.navigation.addEventListener('navigatesuccess', onUrlNavigated);
+  } else {
+    let lastHref = location.href;
+    setInterval(() => {
+      if (location.href !== lastHref) {
+        lastHref = location.href;
+        onUrlNavigated();
+      }
+    }, 1000);
+  }
   window.addEventListener('popstate', onUrlNavigated);
   window.addEventListener('hashchange', onUrlNavigated);
 }
 
+let navScanTimer = null;
 function onUrlNavigated() {
-  setTimeout(() => runScanOnce(), 1500);
+  clearTimeout(navScanTimer);
+  navScanTimer = setTimeout(() => runScanOnce(), 1500);
 }
 
 // Listen for background messages
@@ -389,9 +398,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     setTimeout(() => runScanOnce(), 1500);
   } else if (request.action === 'getSBIBalance') {
     const balance = parseSBIBalance() || lastDetectedBalance;
-    sendResponse({ balance: balance });
+    // With all_frames, every frame receives this and the first reply wins, so frames
+    // without a balance stay silent (the popup falls back to the cached value).
+    if (balance) sendResponse({ balance: balance });
   }
-  return true;
 });
 
 // Run initial setup and scan

@@ -3,31 +3,46 @@
 SBI Monarch Native Messaging Host
 ----------------------------------
 Chrome calls this script via Native Messaging.
-Uses direct aiohttp to call api.monarch.com (library hardcodes old domain).
-Stores session token securely in Apple Keychain via macOS `security` CLI.
+Uses direct aiohttp calls to Monarch's GraphQL API.
+Stores the Monarch session in the OS credential store (Apple Keychain on macOS)
+via the `keyring` library.
 
 Communication: 4-byte length-prefixed JSON over stdin/stdout.
-CLI usage: python3 sbi_monarch_host.py --login
+
+CLI usage:
+    python3 sbi_monarch_host.py --session   # paste a Monarch session cookie / token
+    python3 sbi_monarch_host.py --login     # email + password (+ optional TOTP)
+    python3 sbi_monarch_host.py --status
+    python3 sbi_monarch_host.py --logout
 """
 
-import sys
-import json
-import struct
+from __future__ import annotations
+
 import asyncio
-import subprocess
-import traceback
 import getpass
+import json
+import math
+import struct
+import sys
+import traceback
 
 import aiohttp
+import keyring
+from keyring.errors import KeyringError, PasswordDeleteError
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-MONARCH_API     = 'https://api.monarchmoney.com/graphql'
 MONARCH_LOGIN   = 'https://api.monarchmoney.com/auth/login/'
 EXCHANGE_API    = 'https://open.er-api.com/v6/latest/JPY'
 
 KEYCHAIN_SERVICE = 'sbi-monarch-link'
 KEYCHAIN_ACCOUNT = 'monarch_session_token'
+
+HTTP_TIMEOUT = aiohttp.ClientTimeout(total=20)
+
+# Accounts whose name contains one of these are auto-selected when no account
+# ID has been chosen yet.
+ACCOUNT_KEYWORDS = ('sbi', 'shinsei', 'japan', 'yen')
 
 BASE_HEADERS = {
     'Accept': 'application/json',
@@ -36,49 +51,40 @@ BASE_HEADERS = {
     'User-Agent': 'MonarchMoneyAPI (https://github.com/hammem/monarchmoney)',
 }
 
-# ── Apple Keychain ─────────────────────────────────────────────────────────────
+
+class AuthError(Exception):
+    """Raised when Monarch rejects the stored session (expired / revoked)."""
+
+
+# ── Credential storage (Apple Keychain via keyring) ───────────────────────────
+# keyring talks to the Security framework directly, so the secret never appears
+# in a process argument list (unlike `security add-generic-password -w <secret>`).
+# It reads/writes the same service/account pair the original implementation used.
 
 def keychain_save(token: str) -> bool:
-    """Store token in Apple Keychain. Overwrites existing entry."""
-    # Delete old entry first (ignore errors)
-    subprocess.run(
-        ['security', 'delete-generic-password',
-         '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT],
-        capture_output=True
-    )
-    result = subprocess.run(
-        ['security', 'add-generic-password',
-         '-s', KEYCHAIN_SERVICE,
-         '-a', KEYCHAIN_ACCOUNT,
-         '-w', token,
-         '-U'],  # Update if already exists
-        capture_output=True, text=True
-    )
-    return result.returncode == 0
+    try:
+        keyring.set_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, token)
+        return True
+    except KeyringError:
+        return False
+
 
 def keychain_load() -> str | None:
-    """Load token from Apple Keychain. Returns None if not found."""
-    result = subprocess.run(
-        ['security', 'find-generic-password',
-         '-s', KEYCHAIN_SERVICE,
-         '-a', KEYCHAIN_ACCOUNT,
-         '-w'],  # -w = print password only
-        capture_output=True, text=True
-    )
-    if result.returncode == 0:
-        return result.stdout.strip() or None
-    return None
+    try:
+        return keyring.get_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) or None
+    except KeyringError:
+        return None
 
-def keychain_delete():
-    subprocess.run(
-        ['security', 'delete-generic-password',
-         '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT],
-        capture_output=True
-    )
+
+def keychain_delete() -> None:
+    try:
+        keyring.delete_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+    except (PasswordDeleteError, KeyringError):
+        pass
 
 # ── Monarch API Calls ─────────────────────────────────────────────────────────
 
-async def monarch_login(email: str, password: str, mfa_secret: str = None) -> str:
+async def monarch_login(email: str, password: str, mfa_secret: str | None = None) -> str:
     """Login to Monarch and return auth token. Raises on failure."""
     import oathtool
 
@@ -95,13 +101,13 @@ async def monarch_login(email: str, password: str, mfa_secret: str = None) -> st
         else:
             payload['totp'] = oathtool.generate_otp(clean_mfa)
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
         async with session.post(MONARCH_LOGIN, json=payload, headers=BASE_HEADERS) as resp:
             try:
                 body = await resp.json(content_type=None)
             except Exception:
                 raw = await resp.text()
-                raise ValueError(f'Server returned non-JSON HTTP {resp.status}: {raw[:150]}')
+                raise ValueError(f'Server returned non-JSON HTTP {resp.status}: {raw[:150]}') from None
 
             if resp.status == 403:
                 if isinstance(body, dict) and body.get('detail') == 'MFA_REQUIRED':
@@ -113,8 +119,9 @@ async def monarch_login(email: str, password: str, mfa_secret: str = None) -> st
                 raise ValueError(f'Login failed HTTP {resp.status}: {detail}')
             token = body.get('token') if isinstance(body, dict) else None
             if not token:
-                raise ValueError(f'No token in response: {body}')
+                raise ValueError('Login succeeded but no token was returned.')
             return token
+
 
 def parse_auth_headers(auth_data: str) -> tuple[dict, str]:
     """Returns (headers, endpoint_url) supporting both modern Cookie sessions and legacy Tokens."""
@@ -142,27 +149,47 @@ def parse_auth_headers(auth_data: str) -> tuple[dict, str]:
 
     return headers, endpoint
 
-async def monarch_graphql(token_or_cookie: str, query: str, variables: dict = None) -> dict:
+
+async def monarch_graphql(token_or_cookie: str, query: str, variables: dict | None = None) -> dict:
     """Execute a GraphQL query against Monarch supporting both Cookie and Token auth."""
     headers, endpoint = parse_auth_headers(token_or_cookie)
     payload = {'query': query, 'variables': variables or {}}
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
         async with session.post(endpoint, json=payload, headers=headers) as resp:
-            data = await resp.json(content_type=None)
+            if resp.status in (401, 403):
+                raise AuthError(f'Monarch rejected the session (HTTP {resp.status}).')
             if not resp.ok:
                 raise ValueError(f'GraphQL HTTP {resp.status}: {resp.reason}')
+            try:
+                data = await resp.json(content_type=None)
+            except Exception:
+                raise ValueError(f'GraphQL returned non-JSON response (HTTP {resp.status}).') from None
             if data.get('errors'):
-                raise ValueError(f'GraphQL errors: {data["errors"]}')
+                messages = [e.get('message', str(e)) for e in data['errors']]
+                if any('unauthenticated' in m.lower() or 'not authenticated' in m.lower() for m in messages):
+                    raise AuthError('Monarch session is not authenticated.')
+                raise ValueError(f'GraphQL errors: {messages}')
             return data
 
+
 async def get_exchange_rate() -> float:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(EXCHANGE_API, timeout=aiohttp.ClientTimeout(total=10)) as r:
+    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
+        async with session.get(EXCHANGE_API) as r:
+            r.raise_for_status()
             data = await r.json(content_type=None)
-            return data['rates']['USD']
+    rate = (data.get('rates') or {}).get('USD')
+    if not isinstance(rate, (int, float)) or rate <= 0:
+        raise ValueError('Exchange rate API did not return a valid JPY→USD rate.')
+    return float(rate)
 
 # ── Action Handlers ───────────────────────────────────────────────────────────
+
+def _session_expired() -> dict:
+    keychain_delete()
+    return {'success': False, 'error': 'token_expired',
+            'message': 'Monarch session expired. Paste a fresh session cookie in the extension popup.'}
+
 
 async def handle_ping() -> dict:
     token = keychain_load()
@@ -172,20 +199,23 @@ async def handle_ping() -> dict:
         'message': 'Native host running' + (' (logged in)' if token else ' (not logged in)')
     }
 
-async def handle_login(email: str, password: str, mfa_secret: str = None) -> dict:
+
+async def handle_login(email: str, password: str, mfa_secret: str | None = None) -> dict:
+    if not email or not password:
+        return {'success': False, 'error': 'missing_credentials', 'message': 'Email and password are required.'}
     try:
         token = await monarch_login(email, password, mfa_secret)
         if keychain_save(token):
             return {'success': True, 'message': 'Logged in! Session saved to Apple Keychain.'}
-        else:
-            return {'success': False, 'error': 'keychain_save_failed', 'message': 'Login OK but could not save to Keychain.'}
+        return {'success': False, 'error': 'keychain_save_failed', 'message': 'Login OK but could not save to Keychain.'}
     except ValueError as e:
         msg = str(e)
         if msg == 'MFA_REQUIRED':
-            return {'success': False, 'error': 'mfa_required', 'message': 'MFA required. Provide your TOTP secret key.'}
+            return {'success': False, 'error': 'mfa_required', 'message': 'MFA required. Provide your TOTP secret key or current 6-digit code.'}
         return {'success': False, 'error': 'login_failed', 'message': msg}
     except Exception as e:
-        return {'success': False, 'error': 'login_error', 'message': traceback.format_exc()}
+        return {'success': False, 'error': 'login_error', 'message': f'{type(e).__name__}: {e}'}
+
 
 async def handle_get_accounts() -> dict:
     token = keychain_load()
@@ -204,31 +234,43 @@ async def handle_get_accounts() -> dict:
     '''
     try:
         data = await monarch_graphql(token, query)
-        all_accounts = data.get('data', {}).get('accounts', [])
-        manual = [
-            {'id': a['id'], 'displayName': a.get('displayName', ''), 'currentBalance': a.get('currentBalance', 0)}
-            for a in all_accounts if a.get('isManual')
-        ]
-        # If no explicit isManual accounts exist, return all accounts so user can choose
-        if not manual:
-            manual = [
-                {'id': a['id'], 'displayName': a.get('displayName', ''), 'currentBalance': a.get('currentBalance', 0)}
-                for a in all_accounts
-            ]
-        return {'success': True, 'accounts': manual}
+    except AuthError:
+        return _session_expired()
     except Exception as e:
-        # Token/Cookie might be expired — clear it
-        if '401' in str(e) or 'Unauthorized' in str(e):
-            keychain_delete()
-            return {'success': False, 'error': 'token_expired', 'message': 'Session expired. Please update session cookie.'}
         return {'success': False, 'error': 'fetch_failed', 'message': str(e)}
 
-async def handle_sync(jpy_balance: float, account_id: str = None) -> dict:
+    all_accounts = (data.get('data') or {}).get('accounts') or []
+    manual = [
+        {'id': a['id'], 'displayName': a.get('displayName') or '', 'currentBalance': a.get('currentBalance') or 0}
+        for a in all_accounts if a.get('isManual')
+    ]
+    return {'success': True, 'accounts': manual}
+
+
+def pick_default_account(accounts: list[dict]) -> dict | None:
+    """Return the first manual account whose name looks like an SBI / JPY account."""
+    for a in accounts:
+        name = (a.get('displayName') or '').lower()
+        if any(kw in name for kw in ACCOUNT_KEYWORDS):
+            return a
+    return None
+
+
+def validate_jpy_balance(value) -> float:
+    """Coerce and validate an incoming JPY balance. Raises ValueError if invalid."""
+    if value is None or isinstance(value, bool):
+        raise ValueError('jpy_balance is required.')
+    jpy = float(value)
+    if not math.isfinite(jpy) or jpy < 0:
+        raise ValueError('jpy_balance must be a non-negative number.')
+    return jpy
+
+
+async def handle_sync(jpy_balance: float, account_id: str | None = None) -> dict:
     token = keychain_load()
     if not token:
         return {'success': False, 'error': 'not_logged_in', 'message': 'Not logged in. Open the extension popup and log in.'}
 
-    # Get exchange rate
     try:
         rate = await get_exchange_rate()
     except Exception as e:
@@ -236,23 +278,20 @@ async def handle_sync(jpy_balance: float, account_id: str = None) -> dict:
 
     usd_balance = round(jpy_balance * rate, 2)
 
-    # Resolve account_id if not given
+    # Resolve account_id if not given. Never fall back to an arbitrary account:
+    # writing a balance to the wrong account silently corrupts the user's data.
     account_name = account_id
     if not account_id:
         data = await handle_get_accounts()
         if not data['success']:
             return data
-        accounts = data['accounts']
-        if not accounts:
-            return {'success': False, 'error': 'no_manual_accounts', 'message': 'No manual accounts found in Monarch.'}
-        best = next(
-            (a for a in accounts if any(kw in a['displayName'].lower() for kw in ['sbi', 'shinsei', 'japan', 'yen'])),
-            accounts[0]
-        )
+        best = pick_default_account(data['accounts'])
+        if best is None:
+            return {'success': False, 'error': 'no_account_selected',
+                    'message': 'No target account selected. Open the extension popup and choose a Monarch account.'}
         account_id = best['id']
         account_name = best['displayName']
 
-    # Update balance
     mutation = '''
     mutation UpdateAccountBalance($input: UpdateAccountMutationInput!) {
       updateAccount(input: $input) {
@@ -271,14 +310,15 @@ async def handle_sync(jpy_balance: float, account_id: str = None) -> dict:
     '''
     try:
         data = await monarch_graphql(token, mutation, {'input': {'id': str(account_id), 'displayBalance': float(usd_balance)}})
-        errors = data.get('data', {}).get('updateAccount', {}).get('errors', [])
-        if errors:
-            return {'success': False, 'error': 'update_errors', 'message': str(errors)}
+    except AuthError:
+        return _session_expired()
     except Exception as e:
-        if '401' in str(e) or 'Unauthorized' in str(e):
-            keychain_delete()
-            return {'success': False, 'error': 'token_expired', 'message': 'Session expired. Please log in again.'}
         return {'success': False, 'error': 'update_failed', 'message': str(e)}
+
+    result = (data.get('data') or {}).get('updateAccount') or {}
+    if result.get('errors'):
+        return {'success': False, 'error': 'update_errors', 'message': str(result['errors'])}
+    account_name = (result.get('account') or {}).get('displayName') or account_name
 
     return {
         'success': True,
@@ -290,51 +330,59 @@ async def handle_sync(jpy_balance: float, account_id: str = None) -> dict:
         'message': f'Updated {account_name} → ${usd_balance:,.2f} USD  (¥{jpy_balance:,.0f} × {rate:.6f})'
     }
 
-# ── Native Messaging I/O ──────────────────────────────────────────────────────
-
-def read_message():
-    raw_len = sys.stdin.buffer.read(4)
-    if not raw_len or len(raw_len) < 4:
-        return None
-    msg_len = struct.unpack('I', raw_len)[0]
-    raw_msg = sys.stdin.buffer.read(msg_len)
-    return json.loads(raw_msg.decode('utf-8'))
-
-def send_message(msg: dict):
-    encoded = json.dumps(msg).encode('utf-8')
-    sys.stdout.buffer.write(struct.pack('I', len(encoded)))
-    sys.stdout.buffer.write(encoded)
-    sys.stdout.buffer.flush()
 
 async def handle_save_token(token: str) -> dict:
-    clean_token = token.strip()
+    clean_token = (token or '').strip()
     if not clean_token:
         return {'success': False, 'error': 'missing_token', 'message': 'Token cannot be empty.'}
     if keychain_save(clean_token):
         return {'success': True, 'message': 'Session token saved to Apple Keychain!'}
     return {'success': False, 'error': 'keychain_save_failed', 'message': 'Could not save token to Apple Keychain.'}
 
+
 async def handle(request: dict) -> dict:
     action = request.get('action')
     if action == 'ping':
         return await handle_ping()
-    elif action == 'save_token':
+    if action == 'save_token':
         return await handle_save_token(request.get('token', ''))
-    elif action == 'login':
+    if action == 'login':
         return await handle_login(
             request.get('email', ''),
             request.get('password', ''),
             request.get('mfa_secret') or None
         )
-    elif action == 'get_accounts':
+    if action == 'get_accounts':
         return await handle_get_accounts()
-    elif action == 'sync':
-        jpy = request.get('jpy_balance')
-        if not jpy:
-            return {'success': False, 'error': 'missing_jpy', 'message': 'jpy_balance required'}
-        return await handle_sync(float(jpy), request.get('account_id'))
-    else:
-        return {'success': False, 'error': 'unknown_action', 'message': f'Unknown: {action}'}
+    if action == 'sync':
+        try:
+            jpy = validate_jpy_balance(request.get('jpy_balance'))
+        except (TypeError, ValueError) as e:
+            return {'success': False, 'error': 'invalid_jpy', 'message': str(e)}
+        return await handle_sync(jpy, request.get('account_id') or None)
+    return {'success': False, 'error': 'unknown_action', 'message': f'Unknown action: {action}'}
+
+# ── Native Messaging I/O ──────────────────────────────────────────────────────
+
+MAX_MESSAGE_BYTES = 1024 * 1024  # Chrome caps extension → host messages at 64 MiB; ours are tiny.
+
+
+def read_message():
+    raw_len = sys.stdin.buffer.read(4)
+    if not raw_len or len(raw_len) < 4:
+        return None
+    msg_len = struct.unpack('=I', raw_len)[0]
+    if msg_len > MAX_MESSAGE_BYTES:
+        raise ValueError(f'Message too large ({msg_len} bytes)')
+    raw_msg = sys.stdin.buffer.read(msg_len)
+    return json.loads(raw_msg.decode('utf-8'))
+
+
+def send_message(msg: dict):
+    encoded = json.dumps(msg).encode('utf-8')
+    sys.stdout.buffer.write(struct.pack('=I', len(encoded)))
+    sys.stdout.buffer.write(encoded)
+    sys.stdout.buffer.flush()
 
 # ── CLI Entry Point ───────────────────────────────────────────────────────────
 
@@ -344,40 +392,40 @@ def cli_login():
     print('Credentials are NOT stored — only the session token goes to Apple Keychain.\n')
     email = input('Monarch Email: ').strip()
     password = getpass.getpass('Monarch Password: ')
-    mfa = input('TOTP MFA Secret Key (leave blank if none): ').strip() or None
+    mfa = getpass.getpass('TOTP secret or 6-digit code (leave blank if none): ').strip() or None
 
     print('\nLogging in...')
     result = asyncio.run(handle_login(email, password, mfa))
     print(json.dumps(result, indent=2))
 
+
+def cli_save_session():
+    # Read with getpass so the cookie is not echoed or left in shell history.
+    t = getpass.getpass('Paste Monarch Session Cookie or Token (input hidden): ').strip()
+    if not t:
+        print('Session data cannot be empty.')
+        return
+    print('✅ Session saved to Apple Keychain!' if keychain_save(t) else '❌ Failed to save session to Apple Keychain.')
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1].startswith('--'):
-        if sys.argv[1] == '--login':
+        flag = sys.argv[1]
+        if flag == '--login':
             cli_login()
             return
-        elif sys.argv[1] in ('--token', '--cookie', '--session'):
-            if len(sys.argv) > 2:
-                t = sys.argv[2].strip()
-            else:
-                t = input('Paste Monarch Session Cookie or Token: ').strip()
-            if t:
-                if keychain_save(t):
-                    print('✅ Session saved to Apple Keychain!')
-                else:
-                    print('❌ Failed to save session to Apple Keychain.')
-            else:
-                print('Session data cannot be empty.')
+        if flag in ('--token', '--cookie', '--session'):
+            cli_save_session()
             return
-        elif sys.argv[1] == '--logout':
+        if flag == '--logout':
             keychain_delete()
             print('Session removed from Keychain.')
             return
-        elif sys.argv[1] == '--status':
-            token = keychain_load()
-            print('Logged in (session in Keychain).' if token else 'Not logged in.')
+        if flag == '--status':
+            print('Logged in (session in Keychain).' if keychain_load() else 'Not logged in.')
             return
 
-    # Native Messaging mode (handles chrome-extension://... arguments from browser)
+    # Native Messaging mode (Chrome passes the caller origin, e.g. chrome-extension://..., as argv[1])
     while True:
         try:
             request = read_message()
@@ -386,7 +434,10 @@ def main():
             result = asyncio.run(handle(request))
             send_message(result)
         except Exception:
-            send_message({'success': False, 'error': 'host_exception', 'message': traceback.format_exc()})
+            traceback.print_exc(file=sys.stderr)  # Chrome logs host stderr; keep details out of the UI
+            send_message({'success': False, 'error': 'host_exception',
+                          'message': 'Native host error. Check the browser log for details.'})
+
 
 if __name__ == '__main__':
     main()

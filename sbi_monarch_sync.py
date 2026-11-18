@@ -1,74 +1,59 @@
 #!/usr/bin/env python3
 """
-SBI Shinsei to Monarch Money Balance Syncer
--------------------------------------------
-Fetches live JPY -> USD exchange rate, converts SBI Shinsei account balance (in Yen),
-and updates a manual account in Monarch Money.
+SBI Shinsei to Monarch Money Balance Syncer (CLI)
+-------------------------------------------------
+Converts a JPY balance to USD at the live spot rate and writes it to a manual
+account in Monarch Money, using the same Keychain session as the browser
+extension's native host.
+
+First save a session once:
+    python3 native-host/sbi_monarch_host.py --session
+
+Then:
+    python3 sbi_monarch_sync.py --jpy 1234567 [--account-id 123456789]
 """
 
-import sys
 import argparse
 import asyncio
-import requests
-from monarchmoney import MonarchMoney
+import sys
+from pathlib import Path
 
-EXCHANGE_RATE_API = "https://open.er-api.com/v6/latest/JPY"
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'native-host'))
 
-def get_jpy_to_usd_rate() -> float:
-    """Fetch current JPY to USD exchange rate."""
-    response = requests.get(EXCHANGE_RATE_API, timeout=10)
-    response.raise_for_status()
-    data = response.json()
-    rate = data.get("rates", {}).get("USD")
-    if not rate:
-        raise ValueError("Could not fetch USD exchange rate from API")
-    return rate
+import sbi_monarch_host as host  # noqa: E402
 
-async def sync_to_monarch(email: str, password: str, account_id: str, jpy_balance: float, mfa_secret: str = None):
-    """Log into Monarch Money and update manual account balance."""
-    mm = MonarchMoney()
-    
-    print("Logging into Monarch Money...")
-    if mfa_secret:
-        await mm.login(email=email, password=password, mfa_secret_key=mfa_secret)
-    else:
-        await mm.login(email=email, password=password)
 
-    rate = get_jpy_to_usd_rate()
-    usd_balance = round(jpy_balance * rate, 2)
-    
-    print(f"Current JPY -> USD Rate: 1 JPY = {rate:.6f} USD")
-    print(f"Converting ¥{jpy_balance:,.0f} JPY => ${usd_balance:,.2f} USD")
+def parse_jpy(raw: str) -> float:
+    return host.validate_jpy_balance(raw.replace(',', '').replace('¥', '').strip())
 
-    # Update manual account balance in Monarch
-    print(f"Updating Monarch Account ID '{account_id}'...")
-    await mm.update_account(account_id=account_id, current_balance=usd_balance)
-    print("Successfully updated balance in Monarch Money!")
 
-def main():
-    parser = argparse.ArgumentParser(description="Sync SBI Shinsei JPY balance converted to USD in Monarch Money")
-    parser.add_argument("--jpy", type=float, help="SBI Shinsei balance in JPY")
-    parser.add_argument("--email", type=str, help="Monarch Money email")
-    parser.add_argument("--password", type=str, help="Monarch Money password")
-    parser.add_argument("--account-id", type=str, help="Monarch Manual Account ID")
-    parser.add_argument("--mfa-secret", type=str, help="Optional Monarch MFA secret key", default=None)
-
+def main() -> int:
+    parser = argparse.ArgumentParser(description='Sync an SBI Shinsei JPY balance (converted to USD) to Monarch Money')
+    parser.add_argument('--jpy', type=str, help='SBI Shinsei balance in JPY (commas allowed)')
+    parser.add_argument('--account-id', type=str, default=None,
+                        help='Monarch manual account ID (defaults to the first manual account named like SBI/Shinsei/Japan/Yen)')
+    parser.add_argument('--list-accounts', action='store_true', help='List manual Monarch accounts and exit')
     args = parser.parse_args()
 
-    jpy = args.jpy
-    if jpy is None:
-        try:
-            jpy_input = input("Enter current SBI Shinsei balance in JPY (¥): ").replace(",", "").strip()
-            jpy = float(jpy_input)
-        except ValueError:
-            print("Invalid JPY amount entered.")
-            sys.exit(1)
+    if args.list_accounts:
+        result = asyncio.run(host.handle_get_accounts())
+        if not result['success']:
+            print(f"❌ {result['message']}")
+            return 1
+        for a in result['accounts']:
+            print(f"{a['id']}\t{a['displayName']}\t${a['currentBalance']:,.2f}")
+        return 0
 
-    email = args.email or input("Monarch Email: ").strip()
-    password = args.password or input("Monarch Password: ").strip()
-    account_id = args.account_id or input("Monarch Manual Account ID: ").strip()
+    try:
+        jpy = parse_jpy(args.jpy if args.jpy is not None else input('Current SBI Shinsei balance in JPY (¥): '))
+    except (TypeError, ValueError):
+        print('Invalid JPY amount.')
+        return 1
 
-    asyncio.run(sync_to_monarch(email, password, account_id, jpy, args.mfa_secret))
+    result = asyncio.run(host.handle_sync(jpy, args.account_id))
+    print(('✅ ' if result['success'] else '❌ ') + result['message'])
+    return 0 if result['success'] else 1
 
-if __name__ == "__main__":
-    main()
+
+if __name__ == '__main__':
+    sys.exit(main())

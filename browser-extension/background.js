@@ -23,6 +23,7 @@ function callNativeHost(message) {
 // ── Message listener ─────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (sender.id !== chrome.runtime.id) return false;
 
   // 1. Ping native host (check if installed & logged in)
   if (request.action === 'pingNativeHost') {
@@ -80,7 +81,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  // 5. 1-click sync from SBI Shinsei floating banner
+  // 5. JPY→USD spot rate for the on-page banner (fetched here, not from the bank page)
+  if (request.action === 'getFxRate') {
+    fetch('https://open.er-api.com/v6/latest/JPY')
+      .then(r => r.json())
+      .then(data => {
+        const rate = data && data.rates && data.rates.USD;
+        sendResponse(rate ? { success: true, rate } : { success: false, message: 'No USD rate in response' });
+      })
+      .catch(err => sendResponse({ success: false, message: err.message }));
+    return true;
+  }
+
+  // 6. 1-click sync from SBI Shinsei floating banner
   if (request.action === 'syncBalanceFromBanner') {
     chrome.storage.local.get(['monarchAccountId'], async (items) => {
       try {

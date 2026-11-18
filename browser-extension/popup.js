@@ -1,4 +1,4 @@
-// popup.js - Extension UI logic (v2.0 - Native Messaging Architecture)
+// popup.js - Extension UI logic (Native Messaging architecture)
 
 let currentRate = 0;
 let targetAccountId = null;
@@ -41,7 +41,7 @@ function updateConnectionIndicator(state) {
 
 async function fetchExchangeRate() {
   const rateBadge = document.getElementById('rateBadge');
-  logDebug('Extension v2.0.0 (Native Messaging) active.');
+  logDebug(`Extension v${chrome.runtime.getManifest().version} active.`);
   try {
     const res = await fetch('https://open.er-api.com/v6/latest/JPY');
     const data = await res.json();
@@ -142,7 +142,7 @@ async function loadMonarchAccounts() {
     if (!res || !res.success) {
       const msg = res?.message || 'Failed to load accounts.';
       logDebug('Account load error: ' + msg);
-      if (msg.includes('not_logged_in')) {
+      if (res?.error === 'not_logged_in' || res?.error === 'token_expired') {
         document.getElementById('loginSection').style.display = 'block';
         setStatus('Not logged into Monarch. Enter credentials below.', 'error');
       } else {
@@ -159,14 +159,16 @@ async function loadMonarchAccounts() {
       return;
     }
 
-    // Auto-select saved or best match
+    // Auto-select saved or best match. Only persist a keyword match automatically; a
+    // plain "first account" default is shown but not saved until the user confirms it
+    // (by syncing or choosing it), so the on-page banner never writes to a guessed account.
     const savedId = targetAccountId;
-    let best = fetchedAccounts.find(a => a.id === savedId) ||
-               fetchedAccounts.find(a => ['sbi','shinsei','japan','yen'].some(kw => a.displayName.toLowerCase().includes(kw))) ||
-               fetchedAccounts[0];
+    const saved = fetchedAccounts.find(a => a.id === savedId);
+    const matched = fetchedAccounts.find(a => ['sbi','shinsei','japan','yen'].some(kw => a.displayName.toLowerCase().includes(kw)));
+    const best = saved || matched || fetchedAccounts[0];
 
     targetAccountId = best.id;
-    chrome.storage.local.set({ monarchAccountId: targetAccountId });
+    if (saved || matched) chrome.storage.local.set({ monarchAccountId: targetAccountId });
     renderAccountSelector(fetchedAccounts);
     setStatus(`✓ Ready! ${fetchedAccounts.length} account(s) loaded.`, 'success');
   });
@@ -176,7 +178,7 @@ async function loadMonarchAccounts() {
 
 async function loginToMonarch() {
   const email = document.getElementById('monarchEmail').value.trim();
-  const password = document.getElementById('monarchPassword').value.trim();
+  const password = document.getElementById('monarchPassword').value;
   const mfa = document.getElementById('monarchMfa').value.trim() || null;
 
   if (!email || !password) {
@@ -199,7 +201,7 @@ async function loginToMonarch() {
       updateConnectionIndicator('connected');
       loadMonarchAccounts();
     } else if (res.error === 'mfa_required') {
-      setStatus('MFA required — enter your 6-digit MFA secret key above.', 'error');
+      setStatus('MFA required — enter your TOTP secret key or current 6-digit code above.', 'error');
       logDebug('MFA required. Enter your TOTP secret key (not the 6-digit code).');
     } else {
       setStatus('Login failed: ' + (res.message || res.error), 'error');
@@ -236,6 +238,7 @@ async function syncBalance() {
       logDebug('Sync error: ' + msg);
       setStatus('Sync failed: ' + msg, 'error');
     } else {
+      chrome.storage.local.set({ monarchAccountId: targetAccountId });
       logDebug(`✓ ${res.message}`);
       setStatus(`✓ ${res.message}`, 'success');
       // Refresh accounts list to show updated balance

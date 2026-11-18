@@ -1,9 +1,0 @@
-{
-  "name": "com.sbi.monarch.host",
-  "description": "SBI Shinsei to Monarch Money native sync host",
-  "path": "/Users/travisstinebaugh/git/personal/sbi-monarch-link/native-host/sbi_monarch_host_launcher.sh",
-  "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://olancffkhkogbcnkhemeiooednpodibo/"
-  ]
-}

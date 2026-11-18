@@ -1,108 +1,152 @@
-# SBI Shinsei Bank to Monarch Money Balance Syncer 🇯🇵 ➔ 🇺🇸
+# SBI Shinsei Bank → Monarch Money Balance Syncer 🇯🇵 ➔ 🇺🇸
 
-A lightweight, secure Chrome / Brave / Edge browser extension that bridges your **SBI Shinsei Bank (Japan - JPY)** account balance to **Monarch Money (US - USD)** to seamlessly track your multi-currency net worth in real-time.
+[![CI](https://github.com/tstinebaugh/sbi-monarch-link/actions/workflows/ci.yml/badge.svg)](https://github.com/tstinebaugh/sbi-monarch-link/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+A Chrome / Brave / Edge / Arc extension plus a small local Python service that copies your **SBI Shinsei Bank (JPY)** balance into a manual account in **Monarch Money (USD)**, converted at the live spot rate. Monarch can't link Japanese banks, so this keeps a multi-currency net worth up to date with one click.
+
+> **Platform:** macOS (the native host stores your session in Apple Keychain). Python 3.10+.
 
 ---
 
 ## ✨ Features
 
-- 🏦 **Automatic SBI Shinsei Balance Parsing**: Reads your JPY balance automatically from SBI Shinsei PowerDirect online banking.
-- 💱 **Live Spot FX Exchange Rates**: Converts JPY to USD in real-time using spot currency rates.
-- 🔔 **Interactive On-Page Sync Banner**: When logged into SBI Shinsei, a non-intrusive floating banner appears showing `¥ JPY ➔ $ USD` with a 1-Click **"Sync Now"** button.
-- 🔐 **Zero-Cloud & Apple Keychain Security**: Native Python host handles auth directly with Monarch Money GraphQL API and stores session credentials securely in macOS Apple Keychain.
-- 📋 **Account Dropdown Selector**: Automatically pulls your accounts from Monarch for easy 1-click selection.
+- 🏦 **Automatic balance detection** on SBI Shinsei PowerDirect, with an element picker for when the page layout changes.
+- 💱 **Live JPY→USD conversion** using spot rates.
+- 🔔 **On-page sync banner**: shows `¥ JPY ➔ $ USD` with a one-click **Sync Now** button.
+- 🔐 **Session stored in Apple Keychain**: never in a config file, browser storage, or process arguments.
+- 📋 **Account picker**: lists your manual Monarch accounts so you choose where the balance goes.
 
 ---
 
-## 🔒 Security & Privacy by Design
+## 🧭 How it works
 
-- **100% Local Processing**: No intermediate servers, telemetry, analytics, or third-party cloud backends. All communication happens strictly between your browser, your local machine, and Monarch's official GraphQL API over TLS.
-- **Apple Keychain Credential Storage**: Session credentials are stored encrypted in the macOS Keychain (`security` subsystem) rather than plaintext configuration files.
-- **Scoped Permissions**: The native messaging host manifest strictly locks communication to your extension's unique origin ID.
-
----
-
-## 🛠 Installation Guide
-
-### 1. Load the Browser Extension
-1. Open Chrome, Brave, or Edge and navigate to `chrome://extensions`.
-2. Turn on **Developer mode** (toggle in the top-right corner).
-3. Click **Load unpacked**.
-4. Select the `browser-extension/` directory in this repository.
-5. Note the **Extension ID** displayed (e.g., `olancffkhkogbcnkhemeiooednpodibo`).
-
-### 2. Install Native Host
-Run the automated installer script from your terminal:
-
-```bash
-bash native-host/install_native_host.sh
+```
+ SBI Shinsei page            Browser extension (MV3)                 Native host (Python)            Monarch
+┌──────────────────┐  msg  ┌──────────────────────────┐  native   ┌──────────────────────────┐  HTTPS  ┌─────────┐
+│ content.js       │ ────▶ │ background.js (service   │ ────────▶ │ sbi_monarch_host.py      │ ──────▶ │ GraphQL │
+│  scrape balance  │       │  worker) + popup.js      │ messaging │  • Keychain session      │         │   API   │
+│  floating banner │       │                          │  (stdio)  │  • FX conversion         │         └─────────┘
+└──────────────────┘       └──────────────────────────┘           │  • updateAccount mutation│
+                                                                   └──────────────────────────┘
 ```
 
-Follow the prompt (press Enter to accept the default Extension ID, or paste your ID if different).
+The extension never sees your Monarch credentials. It hands the JPY figure to a [native messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging) host, and that host is the only component that holds the session and talks to Monarch. Chrome only lets the extension ID you registered at install time launch the host.
 
 ---
 
-## 🚀 How to Use
+## 🔒 Security & privacy
 
-### 1. Create a Manual Account in Monarch
-1. In [Monarch Money](https://app.monarchmoney.com/), go to **Accounts ➔ Add Account ➔ Manual Account**.
-2. Name it `SBI Shinsei Bank` (Account Type: Cash / Checking / Asset).
+- **No backend of its own**: no servers, telemetry, or analytics. Network traffic goes only to:
+  - your bank (the page you're already on)
+  - Monarch's API (over TLS)
+  - [open.er-api.com](https://open.er-api.com) for the exchange rate (this request carries no account data)
+- **Keychain storage**: the session is written through the [`keyring`](https://pypi.org/project/keyring/) library, which uses the macOS Security framework directly.
+- **Minimal permissions**: the extension requests only `storage` and `nativeMessaging`, plus host access to the bank's domains and the FX API.
+- **No silent writes to the wrong account**: if you haven't picked a target account and none is named like *SBI / Shinsei / Japan / Yen*, sync refuses to run.
 
-### 2. Connect Your Monarch Session (One-Time Setup)
-Because Monarch Money protects its login endpoints with Cloudflare bot detection, connecting via your active web browser session cookie is the recommended and reliable method.
+See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
-#### How to get your Monarch session cookie:
-1. Open [app.monarchmoney.com](https://app.monarchmoney.com) (or `app.monarch.com`) in your browser.
-2. Open Developer Tools (`Cmd + Option + I` or `F12`) ➔ click the **Network** tab.
-3. Type `graphql` in the filter box and click any request named `graphql`.
-4. In the right panel under **Headers** ➔ **Request Headers**, copy the full value next to `Cookie:` (or copy `session_id=...; csrftoken=...`).
+---
 
-#### Save the session:
-- **Via Extension Popup**: Open the extension popup, paste the cookie into **"Paste Monarch Session Cookie / Token"**, and click **Save Session**.
-- **Via Terminal CLI**: Run:
+## 🛠 Installation
+
+```bash
+git clone https://github.com/tstinebaugh/sbi-monarch-link.git
+cd sbi-monarch-link
+python3 -m pip install -r requirements.txt
+```
+
+### 1. Load the extension
+1. Open `chrome://extensions` (or `brave://extensions`, `edge://extensions`).
+2. Turn on **Developer mode**, then click **Load unpacked** and choose the `browser-extension/` folder.
+3. Copy the **Extension ID** shown on the card. It's 32 letters, and it's unique to your install because it's derived from the folder path.
+
+### 2. Register the native host
+```bash
+bash native-host/install_native_host.sh <YOUR_EXTENSION_ID>
+```
+The installer generates a launcher pinned to the Python interpreter that has the dependencies installed. It then registers the host for every supported browser it finds. Reload the extension afterwards.
+
+---
+
+## 🚀 Usage
+
+### 1. Create a manual account in Monarch
+**Accounts ➔ Add Account ➔ Manual Account**, then name it e.g. `SBI Shinsei Bank` (type: Cash / Checking).
+
+### 2. Connect your Monarch session (one time)
+Monarch's login endpoint sits behind Cloudflare bot protection, so the reliable method is to reuse your browser session:
+
+1. Open [app.monarch.com](https://app.monarch.com) while logged in.
+2. Open DevTools (`⌥⌘I`), go to **Network**, filter for `graphql`, and click any request.
+3. Under **Request Headers**, copy the full `Cookie:` value (it must include `session_id=…` and `csrftoken=…`).
+4. Paste it into the extension popup and click **Save Monarch Session**, or run this and paste at the hidden prompt:
+   ```bash
+   python3 native-host/sbi_monarch_host.py --session
+   ```
+
+> ⚠️ This cookie grants full access to your Monarch account. Treat it like a password. Don't paste it into issues or chats.
+
+Other host commands: `--status`, `--logout`, `--login` (email/password; often blocked by Cloudflare).
+
+### 3. Sync
+- **On-page banner:** log into [SBI Shinsei PowerDirect](https://bk.web.sbishinseibank.co.jp/) and click **Sync Now**. If the detected number is wrong, click **🎯 Pick Element** and select your balance. The extension remembers your choice.
+- **Popup:** check the balance and target account, then click **⚡ Sync Balance to Monarch**.
+- **CLI (no browser):**
   ```bash
-  python3 native-host/sbi_monarch_host.py --session
+  python3 sbi_monarch_sync.py --list-accounts
+  python3 sbi_monarch_sync.py --jpy 1,234,567 --account-id <ID>
   ```
-  *(and paste your cookie string when prompted)*.
-
-### 3. Syncing Your Balance
-- **Method A (On-Page Banner)**: Log into [SBI Shinsei PowerDirect](https://bk.web.sbishinseibank.co.jp/). Click **"Sync Now"** on the floating banner in the bottom-right corner!
-- **Method B (Extension Popup)**: Open the extension popup, verify the parsed balance, and click **"⚡ Sync Balance to Monarch"**.
 
 ---
 
-## 🗺️ Roadmap & Future Enhancements
+## 🧪 Development
 
-- 📊 **US Expat Tax Tracking**: Historical FX conversion logging to assist with annual IRS filings (FBAR / FinCEN 114 and FATCA / Form 8938 peak balance calculation).
-- 📈 **Foreign Exchange Gain/Loss Ledger**: Track basis and currency exchange gains/losses for cross-border transfers.
-- 🏦 **Multi-Account Support**: Auto-differentiate between Yen savings, Yen time deposits, and foreign currency deposit accounts in SBI Shinsei.
+```bash
+python3 -m pip install -r requirements.txt pytest ruff
+pytest           # native host unit tests (no network or Keychain access)
+ruff check .
+```
+
+CI runs the tests, `ruff`, syntax checks on the extension scripts, and `shellcheck` on the installer.
+
+For debugging, open the popup's **Debug Log**, or inspect the service worker from `chrome://extensions`. The host writes stack traces to stderr, which Chrome shows when it's launched with `--enable-logging=stderr`.
 
 ---
 
-## 📁 Repository Structure
+## 📁 Repository structure
 
 ```
 sbi-monarch-link/
-├── README.md                          # Project documentation & setup
-├── requirements.txt                   # Python requirements
-├── sbi_monarch_sync.py               # Optional standalone CLI script
+├── browser-extension/
+│   ├── manifest.json          # Manifest V3 config
+│   ├── background.js          # Service worker: native messaging bridge, FX fetch
+│   ├── content.js             # SBI balance detection + floating banner
+│   ├── popup.html / popup.js  # Popup UI
 ├── native-host/
-│   ├── com.sbi.monarch.host.json      # Native messaging host manifest template
-│   ├── install_native_host.sh         # One-click native host installer
-│   ├── sbi_monarch_host_launcher.sh   # Environment launcher wrapper
-│   └── sbi_monarch_host.py            # Native host (Keychain + Monarch GraphQL API)
-└── browser-extension/
-    ├── manifest.json                  # Manifest V3 extension configuration
-    ├── background.js                  # Service worker (Native messaging bridge)
-    ├── content.js                     # SBI Shinsei DOM scraper + floating banner
-    ├── popup.html                     # Extension Popup UI
-    └── popup.js                       # Extension UI logic & native host communicator
+│   ├── sbi_monarch_host.py    # Native host: Keychain session + Monarch GraphQL
+│   └── install_native_host.sh # Generates launcher + host manifest, registers with browsers
+├── sbi_monarch_sync.py        # Stand-alone CLI (reuses the native host)
+└── tests/                     # pytest suite for the native host
 ```
 
 ---
 
-## ⚖️ Disclaimer
+## ⚠️ Limitations
 
-This project is an unofficial, open-source personal utility and is **not affiliated with, endorsed by, or associated with SBI Shinsei Bank, Ltd. or Monarch Money, Inc.**
+- Balance detection is DOM-scraping heuristics. If SBI changes their site it may pick the wrong number, so check it before syncing, or use the element picker.
+- Monarch's API is undocumented and may change without notice.
+- Only the yen balance is synced; foreign-currency and time-deposit accounts aren't separated yet.
 
-All product names, logos, and brands are property of their respective owners. This software is provided "as is" for personal convenience without warranties of any kind.
+## 🗺️ Roadmap
+
+- 📊 Historical FX logging to help with FBAR / FATCA (Form 8938) peak-balance reporting
+- 📈 FX gain/loss ledger for cross-border transfers
+- 🏦 Separate yen savings, time-deposit and foreign-currency balances
+
+---
+
+## ⚖️ License & disclaimer
+
+[MIT](LICENSE). This is an unofficial personal utility, **not affiliated with, endorsed by, or associated with SBI Shinsei Bank, Ltd. or Monarch Money, Inc.** All product names and brands are property of their respective owners. Automated access may be subject to those services' terms. Use at your own risk.
